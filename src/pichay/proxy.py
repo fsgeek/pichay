@@ -253,6 +253,46 @@ def create_app(
 
         return metrics
 
+    @app.route("/v1/messages/count_tokens", methods=["POST"])
+    def proxy_count_tokens():
+        """Forward count_tokens to upstream, applying compaction first."""
+        body = request.get_json(force=True)
+
+        # Apply the same compaction so the count reflects reality
+        if compact and page_store is not None:
+            messages = body.get("messages", [])
+            stats = compact_messages(
+                messages,
+                age_threshold=age_threshold,
+                min_size=min_size,
+                page_store=page_store,
+            )
+            if stats.evicted_count > 0:
+                print(
+                    f"  [count_tokens] compacted {stats.evicted_count} results "
+                    f"before counting",
+                    file=sys.stderr,
+                )
+
+        headers = dict(request.headers)
+        for h in ["Host", "Content-Length", "Transfer-Encoding"]:
+            headers.pop(h, None)
+
+        query = "/v1/messages/count_tokens"
+        if request.query_string:
+            query += "?" + request.query_string.decode("utf-8")
+
+        try:
+            resp = client.post(query, json=body, headers=headers)
+            return (
+                resp.content,
+                resp.status_code,
+                _strip_response_headers(resp.headers),
+            )
+        except Exception as e:
+            print(f"  [count_tokens] error: {e}", file=sys.stderr)
+            return jsonify({"error": str(e)}), 502
+
     @app.route("/v1/messages", methods=["POST"])
     def proxy_messages():
         """Proxy the messages endpoint with full logging."""
@@ -420,13 +460,36 @@ def create_app(
                     ],
                 }
                 log_record(compaction_record)
+
+                # Dashboard status line
+                before_kb = message_metrics["messages_total_bytes"] / 1024
+                after_kb = post_metrics["messages_total_bytes"] / 1024
+                # 4.15 bytes/token from corpus measurement
+                est_tokens = int(post_metrics["messages_total_bytes"] / 4.15)
+                cap_str = ""
+                if token_cap > 0:
+                    cap_pct = est_tokens / token_cap * 100
+                    cap_str = f" ({cap_pct:.0f}% of {token_cap // 1000}k cap)"
                 print(
-                    f"  Compacted: {stats.evicted_count} results, "
-                    f"saved {stats.bytes_saved:,} bytes "
+                    f"  [{before_kb:.0f}KB → {after_kb:.0f}KB] "
+                    f"~{est_tokens:,} tok{cap_str} | "
+                    f"evicted {stats.evicted_count}, "
+                    f"saved {stats.bytes_saved:,}B "
                     f"({stats.reduction_pct:.0f}%), "
-                    f"cumulative {page_store.cumulative_bytes_saved:,}, "
                     f"faults {len(page_store.faults)}"
                     f"/{page_store.cumulative_evictions}",
+                    file=sys.stderr,
+                )
+            else:
+                # No eviction this turn — still show working set size
+                ws_kb = message_metrics["messages_total_bytes"] / 1024
+                est_tokens = int(message_metrics["messages_total_bytes"] / 4.15)
+                cap_str = ""
+                if token_cap > 0:
+                    cap_pct = est_tokens / token_cap * 100
+                    cap_str = f" ({cap_pct:.0f}% of {token_cap // 1000}k cap)"
+                print(
+                    f"  [{ws_kb:.0f}KB] ~{est_tokens:,} tok{cap_str}",
                     file=sys.stderr,
                 )
 
