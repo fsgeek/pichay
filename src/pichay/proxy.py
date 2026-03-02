@@ -201,18 +201,23 @@ def create_app(
         if body.get("system"):
             request_record["system_prompt_full"] = body["system"]
 
+        # Store full messages for offline replay
+        request_record["messages_full"] = body.get("messages", [])
+
         log_record(request_record)
 
         # --- Temperature override (if configured) ---
         # Extended thinking requires temperature=1; skip override when thinking is active.
-        thinking_config = body.get("thinking", {})
-        thinking_enabled = (
-            isinstance(thinking_config, dict)
-            and thinking_config.get("type") == "enabled"
-            and thinking_config.get("budget_tokens", 0) > 0
-        )
+        # Broad check: any truthy "thinking" field means thinking is requested.
+        thinking_enabled = bool(body.get("thinking"))
         if app.config.get("temperature_override") is not None and not thinking_enabled:
             body["temperature"] = app.config["temperature_override"]
+        elif app.config.get("temperature_override") is not None and thinking_enabled:
+            print(
+                f"  [proxy] Skipping temperature override "
+                f"(thinking enabled: {body.get('thinking')})",
+                file=sys.stderr,
+            )
 
         # --- Context paging (if enabled) ---
         if compact and page_store is not None:
