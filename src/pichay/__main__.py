@@ -121,13 +121,16 @@ def run_experiment(args: argparse.Namespace) -> None:
     print(f"\n[2/5] Starting proxy...", file=sys.stderr)
     port = find_free_port()
 
-    app = create_app(
-        log_dir,
+    create_kwargs = dict(
+        log_dir=log_dir,
         compact=args.compact,
         trim=args.trim,
         age_threshold=args.age_threshold,
         min_size=args.min_size,
     )
+    if args.upstream:
+        create_kwargs["upstream"] = args.upstream
+    app = create_app(**create_kwargs)
     if args.temperature is not None:
         app.config["temperature_override"] = args.temperature
 
@@ -288,6 +291,11 @@ def main():
     parser.add_argument(
         "--system-prompt", default=None,
         help="Override Claude Code's system prompt (--system-prompt flag)",
+    )
+    parser.add_argument(
+        "--upstream", default=None,
+        help="Upstream API base URL (default: https://api.anthropic.com). "
+             "Use for OpenRouter, Kimi, or any Anthropic-compatible endpoint.",
     )
     args = parser.parse_args()
     run_experiment(args)

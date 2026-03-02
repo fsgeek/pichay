@@ -33,7 +33,7 @@ from flask import Flask, Response, request
 
 from pichay.pager import PageStore, compact_messages
 
-ANTHROPIC_API_BASE = "https://api.anthropic.com"
+DEFAULT_API_BASE = "https://api.anthropic.com"
 
 
 def find_free_port() -> int:
@@ -59,6 +59,7 @@ def create_app(
     trim: bool = False,
     age_threshold: int = 4,
     min_size: int = 500,
+    upstream: str = DEFAULT_API_BASE,
 ) -> Flask:
     """Create the proxy Flask app."""
     app = Flask(__name__)
@@ -93,9 +94,11 @@ def create_app(
 
     # Persistent HTTP client for forwarding
     client = httpx.Client(
-        base_url=ANTHROPIC_API_BASE,
+        base_url=upstream,
         timeout=httpx.Timeout(300.0, connect=30.0),
     )
+    if upstream != DEFAULT_API_BASE:
+        print(f"Upstream: {upstream}", file=sys.stderr)
 
     def log_record(record: dict) -> None:
         """Append a record to the log file."""
@@ -537,6 +540,11 @@ def main():
         "--temperature", type=float, default=None,
         help="Override temperature on all requests (e.g., 0 for deterministic)",
     )
+    parser.add_argument(
+        "--upstream", type=str, default=DEFAULT_API_BASE,
+        help=f"Upstream API base URL (default: {DEFAULT_API_BASE}). "
+             "Any Anthropic-compatible endpoint: OpenRouter, Kimi, etc.",
+    )
     args = parser.parse_args()
 
     app = create_app(
@@ -545,6 +553,7 @@ def main():
         trim=args.trim,
         age_threshold=args.age_threshold,
         min_size=args.min_size,
+        upstream=args.upstream,
     )
     if args.temperature is not None:
         app.config["temperature_override"] = args.temperature

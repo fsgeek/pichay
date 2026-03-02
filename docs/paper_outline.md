@@ -100,16 +100,56 @@ management at all.
 
 ### 2.3 Prior Work
 
-- Context compression (LLMLingua, etc.) — lossy, model-dependent,
-  applied to content not structure
-- RAG / retrieval augmentation — addresses the "what to put in" question,
-  not the "what to take out" question
-- Prompt caching (Anthropic, OpenAI) — reduces recomputation cost of
-  static prefixes, does NOT reduce attention cost or memory pressure
-- KV cache optimization — hardware-level, orthogonal to our
-  application-layer interventions
-- No prior work (that we are aware of) measures the waste profile of
-  production agentic tools or implements structural interventions
+- **Context compression (LLMLingua, etc.)** — lossy, model-dependent,
+  applied to content not structure. Asks "how do I make this smaller?"
+  rather than "what should I evict?" Compression is a different operation
+  from memory management.
+
+- **SWE-Pruner and agent context pruning** — closest prior work. Prunes
+  context in SWE-bench agents, framed as compression/pruning. Key
+  difference: they optimize for benchmark scores on a fixed task
+  distribution. We measure production waste profiles and implement
+  structural eviction policies with fault tracking. Their framing is
+  "make the prompt smaller." Ours is "manage the working set." The
+  distinction matters because working-set management composes with
+  other interventions and provides a formal fault model.
+
+- **"Expensively quadratic" analyses (blog.exe, 2025-2026)** — recent
+  work quantifying the n² cost explosion in long agentic sessions where
+  cache reads dominate. Demonstrates the cost bomb is real and not solved
+  by KV tricks alone. Our work provides the intervention they identify
+  as needed.
+
+- **Context engineering as named discipline (2025-2026)** — emerging
+  recognition that managing what goes into context is as important as
+  managing the model itself. "Context engines" as infrastructure
+  (Materialize, Deepset). Our contribution: the specific mechanism
+  (proxy-layer interposition with eviction policies) rather than the
+  general principle.
+
+- **RAG / retrieval augmentation** — addresses the "what to put in"
+  question, not the "what to take out" question. Complementary, not
+  competing.
+
+- **Prompt caching (Anthropic, OpenAI)** — reduces recomputation cost of
+  static prefixes, does NOT reduce attention cost or memory pressure.
+  93.5% cache hit rate in our corpus means caching is working — but
+  cached tokens still occupy context and require attention for every
+  output token.
+
+- **KV cache optimization** — hardware-level, orthogonal to our
+  application-layer interventions. Reduces memory footprint per token,
+  does not reduce the number of tokens.
+
+- **Multi-agent architecture guidance (Cognition, 2025)** — argues
+  against naive multi-agent patterns, implicitly acknowledges that
+  context management is the bottleneck. Our work provides the mechanism.
+
+**Positioning:** Prior work addresses either the cost problem (quadratic
+analyses) or the content problem (compression, pruning, RAG) but not the
+structural problem: context windows are unmanaged physical memory. Our
+contribution is the systems abstraction — working set, eviction policy,
+fault rate — and the empirical evidence that it works on production data.
 
 ---
 
