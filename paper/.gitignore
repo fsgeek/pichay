@@ -4,3 +4,6 @@
 *.log
 *.out
 
+*.fdb_latexmk
+*.fls
+*.xdv

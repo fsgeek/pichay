@@ -118,7 +118,7 @@ The contributions of this paper are:
     utilization in a production agentic AI coding tool.
   \item A taxonomy of waste with four categories and measured
     prevalence.
-  \item Proxy-layer interventions with a formal fault model, achieving
+  \item Proxy-layer interventions with an empirical fault model, achieving
     37.1\% token reduction at 0.0254\% fault rate.
   \item Corpus-scale validation confirming that small-sample findings
     generalize across 857 sessions.
@@ -153,8 +153,8 @@ again---is sent, tokenized, and attended to on every turn.
 
 \subsection{Context Windows as Physical Memory}
 
-The analogy between context windows and physical memory is precise,
-not metaphorical (Table~\ref{tab:vm-analogy}).
+The analogy between context windows and physical memory is structural,
+not merely metaphorical (Table~\ref{tab:vm-analogy}).
 
 \begin{table}[ht]
 \centering
@@ -214,7 +214,7 @@ peak usage by 26--54\%.
 These approaches frame the problem as prompt optimization or
 compression. The key difference: they optimize for benchmark scores
 on fixed task distributions. We measure production waste profiles
-and implement eviction policies with a formal fault model. Their
+and implement eviction policies with an empirically measured fault rate. Their
 framing is ``make the prompt smaller.'' Ours is ``manage the working
 set.'' Working-set management composes with other interventions and
 provides measurable fault rates.
@@ -277,7 +277,8 @@ Sessions are classified by type:
     by the main session to handle subtasks in parallel.
   \item \textbf{Compact sessions} (154): Context compaction
     continuations triggered when the main session approaches
-    its context limit.
+    its context limit (the client automatically summarizes
+    conversation history to stay within the context window).
   \item \textbf{Prompt suggestion sessions} (21): Short sessions
     for generating prompt suggestions.
 \end{itemize}
@@ -341,6 +342,16 @@ both the client and the API---neither is aware of the mutations.
 % ====================================================================
 \section{Results}
 \label{sec:results}
+
+The analysis proceeds in two phases. Phase~1 characterizes broad
+conversational patterns---tool overhead ratios, amplification factors,
+and token accounting---across the full 857-session corpus using session
+transcript analysis. Phase~2 performs detailed API-level waste
+decomposition on a smaller proxy-captured sample (5~sessions,
+99~API calls) where we have full request payloads. The corpus-scale
+projection (Section~\ref{sec:corpus-projection}) then bridges the two
+phases, applying measured conversion constants from Phase~2 to the
+full corpus to estimate fleet-wide addressable waste.
 
 \subsection{Phase 1: Conversation-Level Waste}
 \label{sec:phase1}
@@ -586,8 +597,8 @@ The compact+trim treatment achieves 37.1\% reduction in effective
 input tokens. Cache reads drop 59.6\%. The task completes correctly
 under all conditions---\emph{output quality is non-inferior}.
 
-\subsection{Corpus-Scale Validation}
-\label{sec:corpus-scale}
+\subsection{Corpus-Scale Projection}
+\label{sec:corpus-projection}
 
 We validate the small-sample findings across the full 857-session
 corpus using measured constants from the proxy sessions and tool
@@ -721,7 +732,7 @@ building new data centers and not building them.
 Our corpus represents one user over four months. A fleet-wide
 projection requires per-user token consumption data that inference
 providers hold but have not published. The extrapolation framework
-is straightforward: $N$ users $\times$ 970M tokens per user =
+is straightforward: $N$ users $\times$ 970M tokens per user $=$
 total addressable waste. The mechanism (tool schema waste, content
 duplication, result amplification) is architectural, so the
 per-user waste fraction should be relatively stable even if
