@@ -1,0 +1,13 @@
+{
+  "treatment": "baseline",
+  "run": 2,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Build a system prompt analyzer module at src/pichay/analyzer.py that decomposes and measures system prompt waste across API calls. The module should parse proxy JSONL logs (which store system_prompt_full in request records) and produce: (1) COMPONENT DECOMPOSITION - break the system prompt into semantic components: tool definitions, skill definitions, CLAUDE.md content, MEMORY.md content, git status, IDE context, conversation instructions. Identify each by pattern matching on the text blocks. (2) STATIC vs DYNAMIC ANALYSIS - for each component across turns, report whether it changed. Tool definitions are almost certainly static. Git status may change. Measure bytes wasted re-sending identical content. (3) TOOL USAGE TRACKING - cross-reference tool definitions in the system prompt against actual tool_use blocks in messages. Report which tools were defined but never used. Calculate wasted bytes from unused tool definitions. (4) DUPLICATE DETECTION - find components that appear multiple times (skills are often tripled). Report duplicate byte counts. (5) PER-SESSION SUMMARY - total system prompt bytes, static bytes, dynamic bytes, unused tool bytes, duplicate bytes, each as percentage of total context. Include dataclasses for structured results (match the project style in pager.py and eval.py). Include a CLI entry point: python -m pichay.analyzer <proxy-logs> [--json]. Read proxy.py and eval.py thoroughly to understand the log format before writing any code.",
+  "started_at": "2026-03-02T07:19:16.462867+00:00",
+  "ended_at": "2026-03-02T07:25:38.163252+00:00"
+}

@@ -1,0 +1,13 @@
+{
+  "treatment": "test_author",
+  "run": 2,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": null,
+  "prompt": "You are a test author. You did NOT write the code you are testing. Read src/pichay/analyzer.py and write comprehensive tests in tests/test_analyzer.py. Also read proxy.py and eval.py to understand the data structures. Test: (1) empty log, (2) log with no system_prompt_full, (3) single-turn system prompt decomposition, (4) multi-turn static vs dynamic detection, (5) tool usage tracking with used and unused tools, (6) duplicate skill detection, (7) session summary percentage calculations, (8) CLI entry point with --json flag. Create realistic test fixtures with system prompt blocks that contain tool definitions, CLAUDE.md content, skills, and git status. Do NOT modify any existing source files -- only create tests/test_analyzer.py.",
+  "started_at": "2026-03-02T07:26:18.305536+00:00",
+  "ended_at": "2026-03-02T07:30:38.281863+00:00"
+}
