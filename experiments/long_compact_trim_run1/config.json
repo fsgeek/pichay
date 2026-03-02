@@ -1,0 +1,14 @@
+{
+  "treatment": "long_compact_trim",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": true,
+  "trim": true,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Perform a comprehensive code review of the pichay codebase. For each source file in src/pichay/ (proxy.py, pager.py, eval.py, replay.py, analyzer.py, trimmer.py, __main__.py), read the file and assess: (1) Code quality issues (unused imports, dead code, type errors), (2) Potential bugs or edge cases not handled, (3) Consistency between modules (naming conventions, error handling patterns). Then read each test file in tests/ and check for: (4) Missing test coverage for important code paths, (5) Tests that might produce false passes (testing the wrong thing). Write your complete review to a file at review.md in the project root. Include specific line numbers and file paths for each finding.",
+  "started_at": "2026-03-02T08:10:35.451218+00:00",
+  "ended_at": "2026-03-02T08:13:46.730335+00:00"
+}

@@ -541,9 +541,8 @@ def analyze_trimming(path: Path) -> SessionTrimReport:
 
         # --- Skill dedup (exact) ---
         for text in _find_skill_text_blocks(messages):
-            _, entries, dupes = _dedupe_skills_text(text)
+            new_text, entries, dupes = _dedupe_skills_text(text)
             if dupes > 0:
-                new_text, _, _ = _dedupe_skills_text(text)
                 before = len(text.encode("utf-8"))
                 after = len(new_text.encode("utf-8"))
                 turn.skill_entries += entries
@@ -685,12 +684,6 @@ def print_trim_report(r: SessionTrimReport) -> None:
     print(f"  Skill dedup savings:   {r.total_skill_bytes_saved:>12,} bytes")
     print(f"  Static cache savings:  {r.total_static_bytes_skippable:>12,} bytes")
     print(f"  Total potential:       {total_potential:>12,} bytes")
-
-
-def _pct(part: int, whole: int) -> str:
-    if whole == 0:
-        return "0.0%"
-    return f"{part / whole:.1%}"
 
 
 # ---------------------------------------------------------------------------

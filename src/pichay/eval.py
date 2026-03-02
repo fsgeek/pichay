@@ -222,7 +222,7 @@ def analyze_run(proxy_path: Path, label: str = "") -> RunSummary:
                 msg_bytes = tr_count = tr_bytes = tu_count = 0
 
             duration = rec.get("duration_ms", 0)
-            first_byte = rec.get("first_byte_ms", 0)
+            first_byte = rec.get("first_byte_ms") or 0
 
             # Find compaction for this turn (closest timestamp before response)
             turn_evictions = 0

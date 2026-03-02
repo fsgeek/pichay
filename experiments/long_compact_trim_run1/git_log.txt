@@ -1,0 +1,14 @@
+26e978f exp3: Add --trim to experiment runner + treatment comparison
+b631434 exp3: Capture experiment artifacts (proxy logs, session, eval)
+3b8a97b exp3: Add trimmer module tests (test author output)
+523a8f9 exp3: Build system prompt trimmer + proxy integration (builder output)
+da439ce exp2: Capture experiment artifacts (proxy logs, session, eval)
+c31ebb6 exp2: Add system prompt analyzer tests (test author output)
+22ef5d1 exp2: Build system prompt analyzer + fix stdin blocking (builder output)
+92a5078 exp1: Capture experiment artifacts (proxy logs, session, eval)
+d230df3 exp1: Add replay module tests (test author output)
+dfac89f exp1: Build replay module (builder output)
+340f81d Fix temperature override to respect extended thinking mode
+f1205ee Fix experiment runner for nested Claude Code invocation
+3855276 Add context paging evaluation framework
+b408954 Create initial repository

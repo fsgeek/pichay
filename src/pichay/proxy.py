@@ -23,10 +23,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -430,17 +428,18 @@ def create_app(
                     usage = {}
                     try:
                         text = full_response.decode("utf-8", errors="replace")
-                        for line in reversed(text.split("\n")):
-                            if "message_delta" in line and "usage" in line:
-                                if line.startswith("data: "):
-                                    event_data = json.loads(line[6:])
-                                    usage = event_data.get("usage", {})
-                                    break
-                            elif "message_start" in line and "usage" in line:
-                                if line.startswith("data: "):
-                                    event_data = json.loads(line[6:])
-                                    msg = event_data.get("message", {})
-                                    usage = msg.get("usage", {})
+                        # Merge usage from both message_start (input tokens)
+                        # and message_delta (output tokens). Don't break early.
+                        for line in text.split("\n"):
+                            if not line.startswith("data: "):
+                                continue
+                            if "message_start" in line and "usage" in line:
+                                event_data = json.loads(line[6:])
+                                msg = event_data.get("message", {})
+                                usage.update(msg.get("usage", {}))
+                            elif "message_delta" in line and "usage" in line:
+                                event_data = json.loads(line[6:])
+                                usage.update(event_data.get("usage", {}))
                     except Exception:
                         pass
 
