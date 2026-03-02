@@ -76,6 +76,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     print(f"  Run:          {args.run}", file=sys.stderr)
     print(f"  Project:      {project_dir}", file=sys.stderr)
     print(f"  Compact:      {args.compact}", file=sys.stderr)
+    print(f"  Trim:         {args.trim}", file=sys.stderr)
     print(f"  Temperature:  {args.temperature}", file=sys.stderr)
     print(f"  Output:       {exp_dir}", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
@@ -87,6 +88,7 @@ def run_experiment(args: argparse.Namespace) -> None:
         "project_dir": str(project_dir),
         "branch": args.branch,
         "compact": args.compact,
+        "trim": args.trim,
         "age_threshold": args.age_threshold,
         "min_size": args.min_size,
         "temperature": args.temperature,
@@ -123,6 +125,7 @@ def run_experiment(args: argparse.Namespace) -> None:
     app = create_app(
         log_dir,
         compact=args.compact,
+        trim=args.trim,
         age_threshold=args.age_threshold,
         min_size=args.min_size,
     )
@@ -252,6 +255,10 @@ def main():
     parser.add_argument(
         "--compact", action="store_true",
         help="Enable dead tool result eviction",
+    )
+    parser.add_argument(
+        "--trim", action="store_true",
+        help="Enable system prompt trimming (tool stubs, skill dedup)",
     )
     parser.add_argument(
         "--age-threshold", type=int, default=4,
