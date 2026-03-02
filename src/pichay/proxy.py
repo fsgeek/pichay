@@ -204,7 +204,14 @@ def create_app(
         log_record(request_record)
 
         # --- Temperature override (if configured) ---
-        if app.config.get("temperature_override") is not None:
+        # Extended thinking requires temperature=1; skip override when thinking is active.
+        thinking_config = body.get("thinking", {})
+        thinking_enabled = (
+            isinstance(thinking_config, dict)
+            and thinking_config.get("type") == "enabled"
+            and thinking_config.get("budget_tokens", 0) > 0
+        )
+        if app.config.get("temperature_override") is not None and not thinking_enabled:
             body["temperature"] = app.config["temperature_override"]
 
         # --- Context paging (if enabled) ---
