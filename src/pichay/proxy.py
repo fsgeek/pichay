@@ -58,6 +58,7 @@ def find_free_port() -> int:
 def create_app(
     log_dir: Path,
     compact: bool = False,
+    trim: bool = False,
     age_threshold: int = 4,
     min_size: int = 500,
 ) -> Flask:
@@ -81,6 +82,17 @@ def create_app(
         )
         print(f"Page log: {page_log}", file=sys.stderr)
 
+    # Trimmer state (lives for the proxy session)
+    trimmer = None
+    if trim:
+        from pichay.trimmer import SystemPromptTrimmer
+        # log_record defined below; late-bind via lambda
+        trimmer = SystemPromptTrimmer()
+        print(
+            "Trim mode: tool stubs + skill dedup + static tracking",
+            file=sys.stderr,
+        )
+
     # Persistent HTTP client for forwarding
     client = httpx.Client(
         base_url=ANTHROPIC_API_BASE,
@@ -91,6 +103,10 @@ def create_app(
         """Append a record to the log file."""
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
+
+    # Wire up trimmer logging now that log_record exists
+    if trimmer is not None:
+        trimmer.log_fn = log_record
 
     def measure_system_prompt(body: dict) -> dict:
         """Extract system prompt metrics."""
@@ -205,6 +221,17 @@ def create_app(
         request_record["messages_full"] = body.get("messages", [])
 
         log_record(request_record)
+
+        # --- System prompt trimming (if enabled) ---
+        if trim and trimmer is not None:
+            trim_result = trimmer.trim(body)
+            if trim_result.total_bytes_saved > 0:
+                print(
+                    f"  Trimmed: {trim_result.tools.stubbed_tools} stubs, "
+                    f"{trim_result.skills.duplicates_removed} skill dupes, "
+                    f"saved {trim_result.total_bytes_saved:,} bytes",
+                    file=sys.stderr,
+                )
 
         # --- Temperature override (if configured) ---
         # Extended thinking requires temperature=1; skip override when thinking is active.
@@ -457,13 +484,22 @@ def create_app(
 
     @app.route("/health")
     def health():
+        parts = []
+        if compact:
+            parts.append("compact")
+        if trim:
+            parts.append("trim")
+        mode = "+".join(parts) if parts else "observe"
+
         result = {
             "status": "ok",
-            "mode": "compact" if compact else "observe",
+            "mode": mode,
             "log_file": str(log_file),
         }
         if compact and page_store is not None:
             result["pager"] = page_store.summary()
+        if trim and trimmer is not None:
+            result["trimmer"] = trimmer.summary()
         return result
 
     print(f"Logging to: {log_file}", file=sys.stderr)
@@ -487,6 +523,10 @@ def main():
         help="Enable context paging: evict stale tool results",
     )
     parser.add_argument(
+        "--trim", action="store_true",
+        help="Enable system prompt trimming: tool stubs, skill dedup, static tracking",
+    )
+    parser.add_argument(
         "--age-threshold", type=int, default=4,
         help="Evict tool results older than N user-turns (default: 4)",
     )
@@ -503,6 +543,7 @@ def main():
     app = create_app(
         args.log_dir,
         compact=args.compact,
+        trim=args.trim,
         age_threshold=args.age_threshold,
         min_size=args.min_size,
     )
@@ -510,7 +551,12 @@ def main():
         app.config["temperature_override"] = args.temperature
 
     port = args.port if args.port != 0 else find_free_port()
-    mode = "COMPACT" if args.compact else "OBSERVE"
+    parts = []
+    if args.compact:
+        parts.append("COMPACT")
+    if args.trim:
+        parts.append("TRIM")
+    mode = "+".join(parts) if parts else "OBSERVE"
     print(
         f"Proxy [{mode}] listening on http://localhost:{port}",
         file=sys.stderr,
