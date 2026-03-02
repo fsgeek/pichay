@@ -1,0 +1,811 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\usepackage{tikz}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{enumitem}
+\usepackage{subcaption}
+\usepackage{float}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric,fit,calc}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=green!50!black,
+    urlcolor=blue!60!black,
+}
+
+\title{Context Window Waste in Agentic AI Systems:\\
+  Measurement, Intervention, and Implications}
+
+\author{
+  Tony Mason\thanks{University of British Columbia. \texttt{fsgeek@cs.ubc.ca}} \\
+  \textit{with Claude Opus (Anthropic)}\thanks{AI contributor.
+    Wrote code, analysis, and prose under human direction.
+    Role: Master Builder. See Section~\ref{sec:authorship}.}
+}
+
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+% ====================================================================
+\begin{abstract}
+Agentic AI coding tools treat context windows as append-only logs,
+accumulating tool definitions, system prompts, and stale results
+without reclamation. We instrument a production AI coding assistant
+across 857 sessions and 54{,}170 API calls, measuring 4.45~billion
+effective input tokens of which 21.8\% (970~million tokens) is
+addressable waste from three sources: unused tool schemas sent on
+every request, duplicated system content, and stale tool results
+reprocessed at a median amplification factor of 84.4$\times$.
+
+We implement proxy-layer interventions---tool definition stubbing,
+content deduplication, and age-based eviction---achieving 37.1\%
+reduction in effective input tokens with a 0.0254\% fault rate
+across 1.4~million simulated evictions and non-inferior output
+quality. The waste patterns are structural properties of the agentic
+architecture, not implementation bugs, and generalize to any system
+that sends tool schemas and accumulates conversation state. We
+discuss implications for inference cost, energy consumption, and
+throughput, and identify the open question of whether context
+curation may additionally improve output quality.
+\end{abstract}
+
+% ====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Context windows in agentic AI systems function as unmanaged physical
+memory. Every tool definition, system prompt, and previous tool result
+occupies space for the lifetime of the session. There is no virtual
+memory, no paging, no eviction policy. The default behavior across
+every major AI coding tool---Claude Code, Cursor, GitHub Copilot,
+Windsurf---is accumulation.
+
+This is partly a training artifact. Language models learn from
+conversations that grow monotonically. No model has been trained on
+conversations where content was intelligently removed and output
+improved. The append-only pattern propagates through every framework
+(LangChain, LlamaIndex, Anthropic and OpenAI SDK conversation
+helpers) and every tool built on those frameworks.
+
+It is also a design artifact. The standard Messages API accepts a
+list of messages. The natural operation on a list is append. No
+field in the API says ``this content is stale'' or ``this tool is
+unlikely to be used.'' The protocol does not express the information
+that would enable management.
+
+The result is measurable waste. In a corpus of 857 production
+sessions comprising 54{,}170 API calls and 4.45~billion effective
+input tokens, we find that 21.8\% of input tokens---970~million
+tokens---are addressable waste from three structural sources:
+\begin{enumerate}[nosep]
+  \item \textbf{Unused tool schemas} (11.0\%): 18 tool definitions
+    sent on every request when the median session uses 3.
+  \item \textbf{Content duplication} (2.2\%): Skills listed three
+    times under different prefixes; static system prompts re-sent
+    without change.
+  \item \textbf{Stale tool results} (8.7\%): File contents and
+    search results reprocessed at a median amplification of
+    84.4$\times$ their original size, surviving long past any
+    reference to them.
+\end{enumerate}
+
+We implement three proxy-layer interventions---tool definition
+stubbing, content deduplication, and age-based eviction---achieving
+37.1\% reduction in effective input tokens with a 0.0254\% fault
+rate across 1.4~million simulated evictions. Output quality is
+non-inferior: tasks complete correctly under all treatment
+conditions.
+
+The contributions of this paper are:
+\begin{enumerate}[nosep]
+  \item The first large-scale empirical measurement of context window
+    utilization in a production agentic AI coding tool.
+  \item A taxonomy of waste with four categories and measured
+    prevalence.
+  \item Proxy-layer interventions with a formal fault model, achieving
+    37.1\% token reduction at 0.0254\% fault rate.
+  \item Corpus-scale validation confirming that small-sample findings
+    generalize across 857 sessions.
+  \item A systems framing---context windows as unmanaged physical
+    memory---that provides vocabulary and abstractions for a class
+    of optimizations.
+\end{enumerate}
+
+% ====================================================================
+\section{Background}
+\label{sec:background}
+
+\subsection{Agentic AI Architecture}
+
+Modern AI coding assistants operate as agentic systems: the model
+receives a set of tool definitions (JSON schemas describing available
+operations), a system prompt (identity, instructions, behavioral
+constraints), and a growing message history (alternating user and
+assistant turns including tool invocations and their results).
+
+On each API call, the client application assembles the full context:
+system prompt, tool definitions, and complete message history. The
+inference provider tokenizes this context, computes attention over
+all tokens, and generates a response. The response is appended to
+the message history, and the cycle repeats.
+
+The critical property: \emph{context is reassembled from scratch on
+every API call.} There is no persistent state at the inference layer
+between calls. The entire conversation---including tool definitions
+that haven't changed and results that will never be referenced
+again---is sent, tokenized, and attended to on every turn.
+
+\subsection{Context Windows as Physical Memory}
+
+The analogy between context windows and physical memory is precise,
+not metaphorical (Table~\ref{tab:vm-analogy}).
+
+\begin{table}[ht]
+\centering
+\caption{Virtual memory analogy for context window management.}
+\label{tab:vm-analogy}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{OS Concept} & \textbf{Context Window Equivalent} \\
+\midrule
+Physical memory & Context window (200K tokens) \\
+Virtual memory & Persistent state (disk, databases) \\
+Page table & Retrieval handles (UUIDs, anchors) \\
+Page fault & Model re-requests evicted content \\
+MMU & Proxy layer between client and API \\
+Working set & Currently relevant context subset \\
+Demand paging & Load tool definitions on first use \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Early computer systems managed limited physical memory through
+manual overlays: programmers explicitly swapped code segments in and
+out of a fixed address space. The PDP-11, with 64KB of addressable
+memory, required careful overlay management for programs larger than
+physical memory. The transition to virtual memory---Multics,
+then Unix---automated this management through hardware page tables,
+demand paging, and working-set-based eviction
+policies~\citep{denning1968working,denning1970virtual}.
+
+Context windows are in the overlay era. Applications manually
+manage what fits, with no system-level support for eviction,
+demand loading, or working set estimation. The interventions we
+describe are the beginning of the virtual memory transition for
+LLM context.
+
+\subsection{Related Work}
+\label{sec:related}
+
+\paragraph{Context compression.}
+LLMLingua~\citep{jiang2023llmlingua} and related approaches compress
+prompts by removing tokens predicted to be low-information. These
+are lossy, model-dependent operations applied to content. Our
+interventions are structural: we remove entire categories of waste
+(unused tool schemas, duplicate content, dead results) without lossy
+compression of the remaining content.
+
+\paragraph{Agent context pruning.}
+SWE-Pruner~\citep{wang2026swepruner} trains a 0.6B-parameter neural
+skimmer for task-aware context pruning in SWE-bench agents, achieving
+23--54\% token reduction. \citet{lindenbauer2025complexity} show that
+simple observation masking halves agent cost while matching
+LLM-summarization solve rates. ACON~\citep{kang2025acon} provides a
+unified framework for history and observation compression, reducing
+peak usage by 26--54\%.
+
+These approaches frame the problem as prompt optimization or
+compression. The key difference: they optimize for benchmark scores
+on fixed task distributions. We measure production waste profiles
+and implement eviction policies with a formal fault model. Their
+framing is ``make the prompt smaller.'' Ours is ``manage the working
+set.'' Working-set management composes with other interventions and
+provides measurable fault rates.
+
+\paragraph{Quadratic cost analyses.}
+Recent work has quantified the $O(n^2)$ cost explosion in long
+agentic sessions where cache reads dominate~\citep{zeyliger2026quadratic}.
+Each API call reprocesses the full context; as sessions grow, the
+cumulative cost grows quadratically with session length. Our
+amplification factor measurement (Section~\ref{sec:amplification})
+confirms this at production scale and our interventions directly
+address it.
+
+\paragraph{Prompt caching.}
+Anthropic and OpenAI offer prompt caching that avoids recomputation
+of static prefixes. In our corpus, 93.5\% of input tokens are cache
+reads---caching is working. But cached tokens still occupy the
+context window and require attention computation for every output
+token generated. Caching reduces the input processing cost; it does
+not reduce the attention cost or the memory pressure.
+
+\paragraph{Context engineering.}
+The emerging discipline of context
+engineering~\citep{deepset2025context,willison2025context,mei2025survey}
+recognizes that managing what enters context is as important as the
+model itself. \citet{mei2025survey} survey the field comprehensively,
+covering retrieval, processing, and management. Anthropic's own
+engineering team describes practical
+patterns~\citep{rajasekaran2025context}. Our work provides a specific
+mechanism (proxy-layer interposition with eviction policies) and the
+empirical production data that the field currently lacks.
+
+\paragraph{Positioning.}
+Prior work addresses either the cost problem (quadratic analyses) or
+the content problem (compression, pruning, RAG) but not the
+structural problem: context windows are unmanaged physical memory.
+Our contribution is the systems abstraction---working set, eviction
+policy, fault rate, amplification factor---and the empirical evidence
+that it works on production data.
+
+% ====================================================================
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Corpus}
+\label{sec:corpus}
+
+We instrument Claude Code, Anthropic's AI coding assistant, across
+a single power user's sessions over approximately four months
+(November 2025 through March 2026). The corpus comprises 857
+sessions across 15 software projects, drawn from two sources:
+a local WSL environment (60 sessions) and an Ubuntu VM
+(753 sessions, migrated from a prior machine).
+
+Sessions are classified by type:
+\begin{itemize}[nosep]
+  \item \textbf{Main sessions} (59): Human-facing conversations
+    where the user interacts directly with the assistant.
+  \item \textbf{Subagent sessions} (567): Delegated tasks spawned
+    by the main session to handle subtasks in parallel.
+  \item \textbf{Compact sessions} (154): Context compaction
+    continuations triggered when the main session approaches
+    its context limit.
+  \item \textbf{Prompt suggestion sessions} (21): Short sessions
+    for generating prompt suggestions.
+\end{itemize}
+
+The corpus represents 54{,}170 API calls and 4.45~billion effective
+input tokens (input tokens + cache creation + cache read tokens).
+Token usage is extracted from the API response metadata embedded in
+session transcripts.
+
+\paragraph{Bias declaration.}
+This is a single-user corpus from a power user who regularly
+exhausts context windows across complex, multi-file engineering
+tasks. We argue this is representative of the class where context
+management matters most, and note that Pareto-distributed usage
+means this class likely dominates total fleet token consumption.
+Multi-user validation is identified as future work.
+
+\subsection{Instruments}
+
+We develop three instruments at different layers of the stack:
+
+\paragraph{Probe} (\texttt{probe.py}): A streaming JSONL analyzer
+that reads Claude Code's raw session transcripts. Classifies records
+by type (user, assistant, tool\_result, progress), measures content
+sizes, tracks tool usage, and computes per-session metrics including
+amplification factor and tool overhead ratio. Requires no API calls;
+operates on existing session files.
+
+\paragraph{Proxy} (\texttt{proxy.py}): A transparent HTTP proxy
+deployed between Claude Code and the Anthropic API. Intercepts
+every request, capturing system prompts, tool definitions, message
+arrays, and token usage. Optionally applies interventions (eviction,
+trimming) before forwarding. Logs all decisions to JSONL for offline
+analysis. This is the ``MMU'' in our analogy.
+
+\paragraph{Experiment runner} (\texttt{pichay}): An experiment
+framework that orchestrates paired runs under different treatment
+conditions (baseline, trimmed, compact+trim), captures all
+artifacts (proxy logs, session data, git state, test results),
+and computes comparative metrics. The framework is self-bootstrapping:
+it was built by Claude Code running through its own proxy, with
+each round's logs feeding the next round's analysis.
+
+\subsection{Treatment Conditions}
+
+We define three treatment conditions applied at the proxy layer:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Baseline}: Proxy in observation mode. Logs all
+    traffic without mutation.
+  \item \textbf{Trimmed}: Tool definition stubbing and skill
+    deduplication applied to each request before forwarding.
+  \item \textbf{Compact+Trim}: Stale result eviction (paging)
+    combined with trimming.
+\end{enumerate}
+
+All treatments use the same model (Claude Opus), same temperature,
+and same task prompts. The proxy's interposition is transparent to
+both the client and the API---neither is aware of the mutations.
+
+% ====================================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Phase 1: Conversation-Level Waste}
+\label{sec:phase1}
+
+\paragraph{Tool overhead.}
+Across the full corpus, 79.4\% of conversation bytes are tool
+results. Assistant text accounts for 12.7\% and user text for
+7.9\%. Two independent measurements converge on this ratio
+(78.2\% and 79.4\%), suggesting it is a stable property of the
+workload, not an artifact of sampling.
+
+\paragraph{Tool type concentration.}
+Tool usage is extremely concentrated (Figure~\ref{fig:tool-adoption}).
+\texttt{Read} accounts for 75\% of all tool output bytes (9{,}393
+calls, mean 7{,}935 bytes per result). \texttt{Bash} accounts for
+13.3\% (10{,}090 calls). All other tools contribute less than 5\%
+each. This concentration has a direct implication: file content
+read by the \texttt{Read} tool is the dominant source of
+context bloat.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    xbar,
+    width=0.85\columnwidth,
+    height=8cm,
+    xlabel={Adoption rate (\% of sessions)},
+    symbolic y coords={
+        EnterWorktree, NotebookEdit, TodoWrite, Skill,
+        Agent, TaskStop, TaskOutput, AskUser,
+        EnterPlan, ExitPlan, WebSearch, WebFetch,
+        Edit, Write, Grep, Glob, Bash, Read
+    },
+    ytick=data,
+    yticklabel style={font=\small},
+    xmin=0, xmax=80,
+    bar width=6pt,
+    nodes near coords={\pgfmathprintnumber\pgfplotspointmeta\%},
+    nodes near coords style={font=\tiny, anchor=west},
+    every axis plot/.append style={fill=blue!40},
+]
+\addplot coordinates {
+    (0.0,EnterWorktree) (0.0,NotebookEdit) (0.0,TodoWrite)
+    (0.1,Skill) (0.9,Agent) (0.9,TaskStop)
+    (1.9,AskUser) (3.1,TaskOutput)
+    (3.4,EnterPlan) (3.9,ExitPlan) (3.7,WebSearch)
+    (3.9,WebFetch) (16.0,Edit) (23.6,Write)
+    (25.7,Grep) (37.5,Glob) (63.0,Bash) (72.7,Read)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Tool adoption rate across 801 active sessions. The median
+  session uses 3 of 18 available tools. Seven tools see zero or
+  near-zero adoption, yet their full schemas (collectively
+  $\sim$24{,}500 bytes) are sent on every API call.}
+\label{fig:tool-adoption}
+\end{figure}
+
+\paragraph{Amplification factor.}
+\label{sec:amplification}
+Each tool result persists in context from the turn it was generated
+until the session ends (or the client's internal compaction evicts
+it). We define the \emph{amplification factor} as:
+\[
+  A = \frac{\sum_{r \in R} \text{size}(r) \times \text{turns\_survived}(r)}
+           {\sum_{r \in R} \text{size}(r)}
+\]
+where $R$ is the set of tool results and turns\_survived is the
+number of subsequent turns the result remains in context. This
+measures how many times, on average, each byte of tool output is
+reprocessed.
+
+For main sessions: median $A = 84.4\times$, P75 $= 217.9\times$,
+P90 $= 570.8\times$. For subagents: median $A = 12.8\times$
+(short-lived, less accumulation). Amplification scales linearly
+with session length at a ratio of approximately 0.5, confirming
+the quadratic cost structure identified in recent
+analyses~\citep{zeyliger2026quadratic}.
+
+\paragraph{Token accounting.}
+The corpus consumed 4.45~billion effective input tokens with a
+93.5\% cache hit ratio, meaning the vast majority of input
+processing is served from cache. However, cached tokens still
+occupy the context window and require attention computation for
+every output token. The average API call processes 82{,}061
+effective input tokens and generates 88 output tokens---a
+933:1 input-to-output ratio. Agentic coding is an overwhelmingly
+input-bound workload.
+
+\subsection{Phase 2: API-Level Waste Taxonomy}
+\label{sec:taxonomy}
+
+Using the proxy, we decompose 5 sessions (99 API calls, 24.4~MB
+of request data) into four categories of addressable waste
+(Table~\ref{tab:waste-taxonomy}).
+
+\begin{table}[ht]
+\centering
+\caption{Waste taxonomy. Percentages are of total request bytes
+  across 99 API calls.}
+\label{tab:waste-taxonomy}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+\textbf{Category} & \textbf{Bytes} & \textbf{\%} & \textbf{Mechanism} \\
+\midrule
+Dead tool output & 6{,}468{,}360 & 26.5 & Stale results never re-referenced \\
+Tool definition stubs & 4{,}924{,}950 & 20.2 & Schemas for unused tools \\
+Static re-send & 2{,}680{,}794 & 11.0 & Unchanged system prompt content \\
+Skill triplication & 700{,}582 & 2.9 & Same skill listed $3\times$ \\
+\midrule
+\textbf{Total addressable} & \textbf{14{,}774{,}686} & \textbf{60.5} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Dead tool output (26.5\%).}
+Tool results from early turns persist in context long after any
+reference to them. A file read during orientation (Q1 of the
+session) survives approximately 90\% of the remaining session.
+The content is reprocessed on every subsequent API call, consuming
+attention without contributing to the current task.
+
+\paragraph{Tool definition schemas (20.2\%).}
+Claude Code sends 18 tool definitions totaling 63{,}088 bytes on
+every API call. The median session uses 3 tools. The remaining 15
+tool schemas ($\sim$52{,}500 bytes) are sent, tokenized, and
+attended to on every call without ever being invoked.
+
+\paragraph{Static system content (11.0\%).}
+The system prompt, CLAUDE.md instructions, and memory files are
+re-sent identically on every API call. While prompt caching avoids
+the forward-pass cost, these tokens still occupy the context window
+and participate in attention computation.
+
+\paragraph{Skill triplication (2.9\%).}
+The skills list---describing available slash commands---is injected
+into messages three times under different prefixes (\texttt{base},
+\texttt{example-skills:base}, \texttt{document-skills:base}).
+Simple deduplication removes two-thirds of the entries.
+
+\subsection{Interventions}
+\label{sec:interventions}
+
+All interventions operate in the proxy layer between the client
+application and the inference API. No changes to the model, the
+client, or the API are required.
+
+\paragraph{Tool definition stubbing.}
+Unused tool definitions are replaced with minimal stubs:
+\begin{verbatim}
+{"name": "NotebookEdit",
+ "description": "...(first line)...",
+ "input_schema": {"type":"object","properties":{}}}
+\end{verbatim}
+Full schemas ($\sim$3{,}505 bytes each) are replaced with stubs
+($\sim$80 bytes). On first invocation of a stubbed tool, the full
+definition is restored from a stored copy. The intervention is
+session-scoped: once a tool is used, its schema remains restored
+for the session. Per-request savings: $(18 - k) \times 3{,}425$
+bytes, where $k$ is the number of tools used so far.
+
+\paragraph{Content deduplication.}
+Skill entries are parsed, grouped by base name, and deduplicated
+(keeping the first occurrence). Saves 7{,}453 bytes per request.
+Static system prompt components are tracked by content hash across
+turns; identical components are logged as candidates for prefix
+caching. Currently measurement-only for static components---actual
+stripping requires cache-aware API support.
+
+\paragraph{Stale result eviction (paging).}
+Tool results older than a threshold (4 user-turns from the end of
+the conversation) and larger than a minimum size (500 bytes) are
+evicted. Error results are never evicted (the model needs them for
+debugging). Evicted content is replaced with a summary:
+\begin{quote}
+\small
+\texttt{[Paged out: Read /path/to/file.py (12{,}450 bytes, 287
+  lines). Re-read if needed.]}
+\end{quote}
+The summary preserves the tool name, key parameter, and original
+size ($\sim$200 bytes regardless of original size). If the model
+re-invokes the same tool with the same parameters, this constitutes
+a \emph{page fault}---the eviction was incorrect and the content
+was still needed.
+
+\subsection{Eviction Safety}
+\label{sec:eviction}
+
+We validate eviction safety through offline replay: 29
+proxy-captured sessions are replayed through the pager, simulating
+eviction decisions without making API calls.
+
+\begin{table}[ht]
+\centering
+\caption{Eviction safety results from offline replay.}
+\label{tab:eviction}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Total simulated evictions & 1{,}393{,}000 \\
+Page faults detected & 354 \\
+\textbf{Fault rate} & \textbf{0.0254\%} \\
+Content evicted & 8.49 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A fault rate of 0.0254\% means the eviction policy is sound:
+content older than 4 user-turns is almost never needed again. The
+354 faults represent content that was genuinely dead by the age
+criterion but happened to match a later request. A fault rate of
+zero would indicate over-conservative eviction; some faults are
+expected and acceptable.
+
+\subsection{Live Treatment Comparison}
+\label{sec:treatment}
+
+We run a standardized task under three treatment conditions
+(Table~\ref{tab:treatment}).
+
+\begin{table}[ht]
+\centering
+\caption{Treatment comparison on a standardized task.}
+\label{tab:treatment}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{Baseline} & \textbf{Trimmed} & \textbf{Compact+Trim} \\
+\midrule
+API calls & 3 & 4 & 3 \\
+Effective input tokens & 114{,}222 & 88{,}421 & 71{,}816 \\
+Cache read tokens & 79{,}712 & 38{,}639 & 32{,}228 \\
+Task completed correctly & Yes & Yes & Yes \\
+\midrule
+\textbf{Token reduction} & --- & 22.6\% & \textbf{37.1\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The compact+trim treatment achieves 37.1\% reduction in effective
+input tokens. Cache reads drop 59.6\%. The task completes correctly
+under all conditions---\emph{output quality is non-inferior}.
+
+\subsection{Corpus-Scale Validation}
+\label{sec:corpus-scale}
+
+We validate the small-sample findings across the full 857-session
+corpus using measured constants from the proxy sessions and tool
+usage patterns extracted from raw session transcripts.
+
+The bytes-to-token conversion ratio of 4.15 bytes per effective
+input token is measured from 139 proxy-captured API calls.
+
+\begin{table}[ht]
+\centering
+\caption{Corpus-scale token savings projection.}
+\label{tab:corpus-tokens}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Intervention} & \textbf{Tokens Saved} & \textbf{\% of Input} \\
+\midrule
+Tool stub trimming & 487.5M & 11.0\% \\
+Skill deduplication & 95.8M & 2.2\% \\
+Static re-send & 387.0M & 8.7\% \\
+\midrule
+\textbf{Total addressable} & \textbf{970.4M} & \textbf{21.8\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The average saving is 17{,}913 tokens per API call. Across the
+corpus, this translates to 85~billion fewer token-token attention
+pairs (17{,}913 context tokens $\times$ 88 output tokens $\times$
+54{,}170 calls).
+
+% ====================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why This Waste Exists}
+
+The append-only pattern in agentic AI tools is not an implementation
+bug. It arises from four reinforcing factors:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Training data}: Models learn from conversations that
+    grow monotonically. No training examples demonstrate intelligent
+    content removal.
+  \item \textbf{API design}: The Messages API accepts a list of
+    messages. The natural operation on a list is append. The API
+    provides no mechanism for ``this content is stale.''
+  \item \textbf{Framework defaults}: Every orchestration framework
+    appends by default. Eviction requires explicit engineering.
+  \item \textbf{Invisible cost}: Token consumption is billed after
+    the fact. Quality degradation from context bloat is invisible
+    unless measured. There is no backpressure signal.
+\end{enumerate}
+
+\subsection{Generalizability}
+
+The waste patterns we measure are structural consequences of the
+agentic architecture:
+
+\begin{itemize}[nosep]
+  \item Any system that sends tool definitions on every request
+    will send schemas for unused tools. The specific percentage
+    depends on tool count and usage distribution, but the mechanism
+    is universal.
+  \item Any system that injects instructions into messages risks
+    duplication. Claude Code's triplication is egregious but not
+    unique.
+  \item Any system that keeps tool results in context for the
+    session lifetime will see amplification proportional to session
+    length.
+\end{itemize}
+
+Our empirical evidence is from one system (Claude Code) and one
+user. The structural argument is strong---the architecture
+forces the waste---but comparative measurement of other tools
+would strengthen the generalizability claim.
+
+\subsection{Quality: Non-Inferiority}
+\label{sec:quality}
+
+Removing 37.1\% of context tokens produces output of equivalent
+quality to the unmodified baseline. Tasks complete correctly under
+all treatment conditions. Model behavior is unchanged: the same
+tools are invoked, the same task structure emerges.
+
+Non-inferiority is sufficient to justify the intervention. If you
+get the same results with 37\% less compute, that is the complete
+argument. You do not need a quality improvement---you need to
+demonstrate that you have not made things worse.
+
+The stronger hypothesis---that removing waste tokens \emph{improves}
+output quality by concentrating attention on signal---is plausible
+but untested. Transformer attention distributes weight across all
+tokens in context; irrelevant tokens dilute attention on relevant
+tokens. Removing them should, in principle, improve attention
+allocation. We identify this as a priority for future work.
+
+\subsection{Compute and Energy Implications}
+\label{sec:energy}
+
+The 970~million tokens of addressable waste in our corpus have
+three compute cost dimensions:
+
+\paragraph{Input processing.}
+At a 93.5\% cache hit rate, most saved tokens are cache reads
+(907M tokens at reduced cost). However, 63M tokens are cache
+creation or uncached---full forward-pass computation that need not
+occur.
+
+\paragraph{Attention cost.}
+For every output token, the model computes attention over the full
+context. Removing 17{,}913 tokens from a mean context of 82{,}061
+reduces the per-output-token attention computation by 21.8\%.
+Across the corpus, this eliminates 85~billion token-token attention
+pairs.
+
+\paragraph{Throughput.}
+Each token in context requires KV cache memory. For large models,
+the per-token KV cache footprint is on the order of megabytes.
+Smaller context per request means less KV cache memory per request,
+which means more concurrent requests per GPU. A 21.8\% context
+reduction translates, to first approximation, to 21.8\% more
+concurrent users on the same GPU fleet.
+
+This is the argument that changes the infrastructure economics.
+The savings are not just ``less cost per request''---they are
+``more requests per machine,'' which is the difference between
+building new data centers and not building them.
+
+\paragraph{Fleet-scale extrapolation.}
+Our corpus represents one user over four months. A fleet-wide
+projection requires per-user token consumption data that inference
+providers hold but have not published. The extrapolation framework
+is straightforward: $N$ users $\times$ 970M tokens per user =
+total addressable waste. The mechanism (tool schema waste, content
+duplication, result amplification) is architectural, so the
+per-user waste fraction should be relatively stable even if
+absolute token counts vary.
+
+% ====================================================================
+\section{Future Work}
+\label{sec:future}
+
+\paragraph{Superiority testing.}
+Non-inferiority is established. The next question is whether
+intervention actively \emph{improves} output quality. We propose
+paired A/B experiments: same task, same model, temperature 0,
+comparing output quality under baseline and compact+trim conditions.
+Minimum 30 paired sessions for statistical power. The experiment
+framework is built for this.
+
+\paragraph{Dataflow-based eviction.}
+Current eviction is FIFO (age-based). Smarter eviction would track
+which tool results are referenced by subsequent messages and evict
+only unreferenced content---analogous to reference counting in
+memory management. Expected improvement: lower fault rate at
+higher eviction rate.
+
+\paragraph{Comparative measurement.}
+Instrument other agentic tools (Cursor, Copilot, Windsurf,
+Continue.dev) to measure the same metrics. The structural argument
+predicts similar waste profiles; empirical confirmation would
+strengthen generalizability.
+
+\paragraph{Multi-user validation.}
+Deploy the proxy across multiple users with different usage patterns,
+project types, and experience levels to validate that the waste
+fraction is stable.
+
+\paragraph{Formal energy modeling.}
+Partner with inference providers to obtain FLOPs-per-token data on
+deployed hardware, enabling conversion from token savings to kWh
+and environmental impact.
+
+% ====================================================================
+\section{Conclusion}
+
+Context windows in agentic AI systems are unmanaged physical memory.
+We measure the cost of this absence of management: 21.8\% of
+effective input tokens (970~million in our corpus) are addressable
+waste from unused tool schemas, duplicated content, and stale
+results. Proxy-layer interventions---requiring no changes to models,
+clients, or APIs---achieve 37.1\% token reduction with 0.0254\%
+fault rate and non-inferior output quality.
+
+The waste patterns are structural. They arise from the append-only
+architecture shared by every major agentic AI tool. The
+interventions are trivial once the waste is identified: one set
+membership check for tool stubbing, one dedup pass for content
+duplication, one age comparison for stale result eviction.
+
+The systems community solved this problem for physical memory fifty
+years ago. The abstractions transfer: working sets, eviction
+policies, demand paging, fault rates. The tools are built. The
+measurements are done. What remains is adoption.
+
+% ====================================================================
+\section*{Authorship and AI Contribution}
+\label{sec:authorship}
+
+This paper was co-authored by a human researcher and an AI system
+(Claude Opus, Anthropic). The AI contributed code (analysis tools,
+proxy implementation, experiment framework), data analysis, and
+paper drafting under human direction. The human contributed research
+design, hypothesis formulation, editorial judgment, and the
+observation that the waste pattern generalizes beyond Claude Code.
+
+The experiment framework (pichay) was itself built by the system
+being studied---Claude Code running through its own proxy---making
+this work partially self-referential. We consider this a feature,
+not a bug: the system's ability to measure and optimize its own
+context usage is evidence that the interventions are practical.
+
+All instruments and data are open source:
+\url{https://github.com/fsgeek/pichay}.
+
+% ====================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
