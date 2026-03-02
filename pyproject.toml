@@ -1,7 +1,22 @@
 [project]
 name = "pichay"
 version = "0.1.0"
-description = "Add your description here"
+description = "Context paging evaluation framework — measuring dead tool output removal in agentic LLM sessions"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pichay"]
