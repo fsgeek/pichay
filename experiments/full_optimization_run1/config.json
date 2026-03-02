@@ -1,0 +1,14 @@
+{
+  "treatment": "full_optimization",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": true,
+  "trim": true,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Read src/pichay/eval.py and report how many lines it has and what its main function is.",
+  "started_at": "2026-03-02T08:19:24.213150+00:00",
+  "ended_at": "2026-03-02T08:19:38.772380+00:00"
+}

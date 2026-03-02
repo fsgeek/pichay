@@ -1,0 +1,14 @@
+{
+  "treatment": "minimal_sysprompt",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "trim": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Print 'hello world' using the Bash tool.",
+  "started_at": "2026-03-02T08:17:57.514344+00:00",
+  "ended_at": "2026-03-02T08:18:08.982400+00:00"
+}

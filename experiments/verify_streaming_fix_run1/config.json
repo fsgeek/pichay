@@ -1,0 +1,14 @@
+{
+  "treatment": "verify_streaming_fix",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": true,
+  "trim": true,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Read src/pichay/proxy.py lines 430-445 and confirm the streaming usage extraction now merges from both message_start and message_delta events. Report what you see.",
+  "started_at": "2026-03-02T08:17:08.727712+00:00",
+  "ended_at": "2026-03-02T08:17:21.533107+00:00"
+}

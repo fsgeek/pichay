@@ -155,8 +155,10 @@ def run_experiment(args: argparse.Namespace) -> None:
         "-p",
         "--dangerously-skip-permissions",
         "--max-budget-usd", str(args.max_budget),
-        args.prompt,
     ]
+    if args.system_prompt is not None:
+        claude_cmd.extend(["--system-prompt", args.system_prompt])
+    claude_cmd.append(args.prompt)
     try:
         subprocess.run(
             claude_cmd,
@@ -282,6 +284,10 @@ def main():
     parser.add_argument(
         "--no-clear-session", action="store_false", dest="clear_session",
         help="Keep previous Claude session data",
+    )
+    parser.add_argument(
+        "--system-prompt", default=None,
+        help="Override Claude Code's system prompt (--system-prompt flag)",
     )
     args = parser.parse_args()
     run_experiment(args)
