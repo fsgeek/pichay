@@ -36,8 +36,25 @@ from pichay.proxy import create_app, find_free_port
 
 def find_project_claude_dir(project_dir: str) -> Path:
     """Map a project directory to its ~/.claude/projects/ path."""
-    normalized = project_dir.replace("/", "-").lstrip("-")
+    normalized = project_dir.replace("/", "-")
     return Path.home() / ".claude" / "projects" / normalized
+
+
+# Environment variables that cause Claude Code to detect nested invocation.
+_CLAUDE_NESTED_VARS = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+]
+
+
+def clean_env_for_subprocess() -> dict[str, str]:
+    """Build environment for nested Claude Code, removing detection vars."""
+    env = os.environ.copy()
+    for var in _CLAUDE_NESTED_VARS:
+        env.pop(var, None)
+    return env
 
 
 def run_experiment(args: argparse.Namespace) -> None:
@@ -128,10 +145,16 @@ def run_experiment(args: argparse.Namespace) -> None:
     print(f"  Prompt: {args.prompt[:80]}...", file=sys.stderr)
     print(file=sys.stderr)
 
-    env = os.environ.copy()
+    env = clean_env_for_subprocess()
     env["ANTHROPIC_BASE_URL"] = f"http://localhost:{port}"
 
-    claude_cmd = ["claude", "--prompt", args.prompt]
+    claude_cmd = [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--max-budget-usd", str(args.max_budget),
+        args.prompt,
+    ]
     try:
         subprocess.run(
             claude_cmd,
@@ -240,6 +263,10 @@ def main():
     parser.add_argument(
         "--temperature", type=float, default=None,
         help="Override temperature (e.g., 0 for deterministic)",
+    )
+    parser.add_argument(
+        "--max-budget", type=float, default=20.0,
+        help="Maximum dollar budget for Claude Code session (default: $20)",
     )
     parser.add_argument(
         "--clear-session", action="store_true", default=True,
