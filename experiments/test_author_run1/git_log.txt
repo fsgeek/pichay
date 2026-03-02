@@ -1,0 +1,5 @@
+dfac89f exp1: Build replay module (builder output)
+340f81d Fix temperature override to respect extended thinking mode
+f1205ee Fix experiment runner for nested Claude Code invocation
+3855276 Add context paging evaluation framework
+b408954 Create initial repository

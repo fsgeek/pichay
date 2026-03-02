@@ -1,0 +1,13 @@
+{
+  "treatment": "test_author",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": null,
+  "prompt": "You are a test author. You did NOT write the code you are testing. Read src/pichay/replay.py and write comprehensive tests in tests/test_replay.py. Also read pager.py and eval.py to understand the data structures and imported functions. Test: (1) empty log file, (2) log with no messages_full field (pre-replay logs), (3) single-turn session (too few turns for compaction), (4) multi-turn session where tool results age past threshold, (5) page fault detection when model re-requests evicted content, (6) byte counting accuracy, (7) the CLI entry point with --json flag, (8) aggregate stats across multiple sessions. Create realistic test fixtures as JSONL strings. Do NOT modify any existing source files -- only create tests/test_replay.py.",
+  "started_at": "2026-03-02T02:54:01.871951+00:00",
+  "ended_at": "2026-03-02T03:00:59.983073+00:00"
+}

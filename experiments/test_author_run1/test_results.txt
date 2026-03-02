@@ -1,0 +1,58 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- /home/tony/projects/pichay/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/tony/projects/pichay
+configfile: pyproject.toml
+plugins: anyio-4.12.1
+collecting ... collected 48 items
+
+tests/test_replay.py::TestEmptyLog::test_returns_zero_turns PASSED       [  2%]
+tests/test_replay.py::TestEmptyLog::test_properties_safe_on_empty PASSED [  4%]
+tests/test_replay.py::TestEmptyLog::test_log_path_stored PASSED          [  6%]
+tests/test_replay.py::TestNoMessagesFull::test_pre_replay_log_skipped PASSED [  8%]
+tests/test_replay.py::TestNoMessagesFull::test_non_request_records_ignored PASSED [ 10%]
+tests/test_replay.py::TestNoMessagesFull::test_mixed_records_only_eligible_processed PASSED [ 12%]
+tests/test_replay.py::TestSingleTurn::test_no_eviction_default_threshold PASSED [ 14%]
+tests/test_replay.py::TestSingleTurn::test_small_results_never_evicted PASSED [ 16%]
+tests/test_replay.py::TestSingleTurn::test_error_results_never_evicted PASSED [ 18%]
+tests/test_replay.py::TestMultiTurnEviction::test_first_request_evicts_oldest PASSED [ 20%]
+tests/test_replay.py::TestMultiTurnEviction::test_cumulative_evictions_across_requests PASSED [ 22%]
+tests/test_replay.py::TestMultiTurnEviction::test_bytes_saved_increases PASSED [ 25%]
+tests/test_replay.py::TestMultiTurnEviction::test_reduction_pct PASSED   [ 27%]
+tests/test_replay.py::TestMultiTurnEviction::test_apply_evictions_replaces_previously_evicted PASSED [ 29%]
+tests/test_replay.py::TestMultiTurnEviction::test_custom_thresholds PASSED [ 31%]
+tests/test_replay.py::TestMultiTurnEviction::test_custom_min_size PASSED [ 33%]
+tests/test_replay.py::TestPageFaultDetection::test_fault_detected PASSED [ 35%]
+tests/test_replay.py::TestPageFaultDetection::test_fault_rate PASSED     [ 37%]
+tests/test_replay.py::TestPageFaultDetection::test_cumulative_faults PASSED [ 39%]
+tests/test_replay.py::TestPageFaultDetection::test_original_tool_use_not_counted_as_fault PASSED [ 41%]
+tests/test_replay.py::TestPageFaultDetection::test_no_double_counting_across_requests PASSED [ 43%]
+tests/test_replay.py::TestByteCountingAccuracy::test_bytes_original_matches_json_serialization PASSED [ 45%]
+tests/test_replay.py::TestByteCountingAccuracy::test_bytes_saved_equals_diff PASSED [ 47%]
+tests/test_replay.py::TestByteCountingAccuracy::test_compacted_smaller_than_original PASSED [ 50%]
+tests/test_replay.py::TestByteCountingAccuracy::test_no_eviction_bytes_unchanged PASSED [ 52%]
+tests/test_replay.py::TestByteCountingAccuracy::test_total_bytes_accumulate PASSED [ 54%]
+tests/test_replay.py::TestByteCountingAccuracy::test_reduction_pct_per_turn PASSED [ 56%]
+tests/test_replay.py::TestByteCountingAccuracy::test_message_count_matches PASSED [ 58%]
+tests/test_replay.py::TestCLIEntryPoint::test_json_single_session PASSED [ 60%]
+tests/test_replay.py::TestCLIEntryPoint::test_json_multiple_sessions_includes_aggregate PASSED [ 62%]
+tests/test_replay.py::TestCLIEntryPoint::test_json_custom_thresholds PASSED [ 64%]
+tests/test_replay.py::TestCLIEntryPoint::test_missing_file_skipped PASSED [ 66%]
+tests/test_replay.py::TestCLIEntryPoint::test_human_readable_output PASSED [ 68%]
+tests/test_replay.py::TestAggregateStats::test_aggregate_totals PASSED   [ 70%]
+tests/test_replay.py::TestAggregateStats::test_aggregate_fault_rate PASSED [ 72%]
+tests/test_replay.py::TestAggregateStats::test_aggregate_json_output PASSED [ 75%]
+tests/test_replay.py::TestAggregateStats::test_print_aggregate_no_crash PASSED [ 77%]
+tests/test_replay.py::TestAggregateStats::test_print_aggregate_empty PASSED [ 79%]
+tests/test_replay.py::TestAggregateStats::test_print_session_report_no_crash PASSED [ 81%]
+tests/test_replay.py::TestAggregateStats::test_print_session_report_empty_session PASSED [ 83%]
+tests/test_replay.py::TestApplyEvictions::test_replaces_evicted_tool_result PASSED [ 85%]
+tests/test_replay.py::TestApplyEvictions::test_skips_non_user_messages PASSED [ 87%]
+tests/test_replay.py::TestApplyEvictions::test_skips_string_content PASSED [ 89%]
+tests/test_replay.py::TestApplyEvictions::test_leaves_non_evicted_alone PASSED [ 91%]
+tests/test_replay.py::TestSessionReplayProperties::test_fault_rate_zero_evictions PASSED [ 93%]
+tests/test_replay.py::TestSessionReplayProperties::test_fault_rate_with_evictions PASSED [ 95%]
+tests/test_replay.py::TestSessionReplayProperties::test_reduction_pct_zero_bytes PASSED [ 97%]
+tests/test_replay.py::TestSessionReplayProperties::test_reduction_pct_with_bytes PASSED [100%]
+
+============================== 48 passed in 0.12s ==============================

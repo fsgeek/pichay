@@ -1,0 +1,9 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- /home/tony/projects/yanantin/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/tony/projects/pichay
+configfile: pyproject.toml
+plugins: anyio-4.12.1
+collecting ... collected 0 items
+
+============================ no tests ran in 0.01s =============================

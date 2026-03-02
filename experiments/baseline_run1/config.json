@@ -1,0 +1,13 @@
+{
+  "treatment": "baseline",
+  "run": 1,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "Build a replay module at src/pichay/replay.py that enables offline simulation of context paging. The module should: (1) Parse proxy JSONL logs (the format logged by proxy.py), (2) Reconstruct the messages array as it would have been at each API call turn, (3) Run the pager compaction logic (from pager.py) on each reconstructed snapshot, (4) Check if the model's actual next action re-requested evicted content (a page fault), (5) Report per-session and aggregate statistics: fault rate, bytes saved, reduction percentage. Include a CLI entry point (argparse) that accepts path(s) to proxy JSONL log files, --age-threshold (default 4), --min-size (default 500), --json flag for machine-readable output. Read the existing pager.py, proxy.py, and eval.py thoroughly before writing any code. Match the coding style and patterns.",
+  "started_at": "2026-03-02T02:45:51.610007+00:00",
+  "ended_at": "2026-03-02T02:53:01.195983+00:00"
+}
