@@ -1,0 +1,10 @@
+da439ce exp2: Capture experiment artifacts (proxy logs, session, eval)
+c31ebb6 exp2: Add system prompt analyzer tests (test author output)
+22ef5d1 exp2: Build system prompt analyzer + fix stdin blocking (builder output)
+92a5078 exp1: Capture experiment artifacts (proxy logs, session, eval)
+d230df3 exp1: Add replay module tests (test author output)
+dfac89f exp1: Build replay module (builder output)
+340f81d Fix temperature override to respect extended thinking mode
+f1205ee Fix experiment runner for nested Claude Code invocation
+3855276 Add context paging evaluation framework
+b408954 Create initial repository

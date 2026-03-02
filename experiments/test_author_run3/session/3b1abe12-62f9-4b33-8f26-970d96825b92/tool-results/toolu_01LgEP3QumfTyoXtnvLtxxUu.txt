@@ -1,0 +1,1348 @@
+     1→"""Tests for pichay.analyzer — system prompt waste analysis on proxy logs."""
+     2→
+     3→from __future__ import annotations
+     4→
+     5→import json
+     6→import sys
+     7→from dataclasses import asdict
+     8→from pathlib import Path
+     9→
+    10→import pytest
+    11→
+    12→from pichay.analyzer import (
+    13→    Component,
+    14→    ComponentTrack,
+    15→    DuplicateGroup,
+    16→    SessionAnalysis,
+    17→    ToolUsageReport,
+    18→    _classify_reminder,
+    19→    _collect_tool_uses,
+    20→    _extract_message_injections,
+    21→    _extract_skill_entries,
+    22→    _extract_sp_components,
+    23→    _find_duplicate_skills,
+    24→    _infer_tool_definition_bytes,
+    25→    _split_into_sections,
+    26→    analyze_system_prompts,
+    27→    main,
+    28→    print_analysis,
+    29→)
+    30→
+    31→
+    32→# ---------------------------------------------------------------------------
+    33→# Helpers
+    34→# ---------------------------------------------------------------------------
+    35→
+    36→def _write_jsonl(tmp_path: Path, name: str, records: list[dict]) -> Path:
+    37→    """Write a list of dicts as JSONL and return the path."""
+    38→    p = tmp_path / name
+    39→    with open(p, "w", encoding="utf-8") as f:
+    40→        for rec in records:
+    41→            f.write(json.dumps(rec) + "\n")
+    42→    return p
+    43→
+    44→
+    45→# ---------------------------------------------------------------------------
+    46→# Realistic system prompt text (abridged to test section splitting)
+    47→# ---------------------------------------------------------------------------
+    48→
+    49→SYSTEM_PROMPT_TEXT = """\
+    50→You are a Claude agent, built on Anthropic's Claude Agent SDK.
+    51→You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
+    52→
+    53→# System
+    54→ - All text you output outside of tool use is displayed to the user.
+    55→ - Tools are executed in a user-selected permission mode.
+    56→ - Tool results and user messages may include <system-reminder> or other tags.
+    57→
+    58→# Doing tasks
+    59→ - The user will primarily request you to perform software engineering tasks.
+    60→ - You are highly capable and often allow users to complete ambitious tasks.
+    61→
+    62→# Executing actions with care
+    63→Carefully consider the reversibility and blast radius of actions.
+    64→
+    65→# Using your tools
+    66→ - Do NOT use the Bash to run commands when a relevant dedicated tool is provided.
+    67→ - Break down and manage your work with the TodoWrite tool.
+    68→
+    69→# Tone and style
+    70→ - Only use emojis if the user explicitly requests it.
+    71→ - Your responses should be short and concise.
+    72→
+    73→# auto memory
+    74→You have a persistent auto memory directory at /home/user/.claude/memory/.
+    75→
+    76→# Environment
+    77→You have been invoked in the following environment:
+    78→ - Primary working directory: /home/user/project
+    79→ - Platform: linux
+    80→ - Shell: bash
+    81→
+    82→gitStatus: This is the git status at the start of the conversation.
+    83→Current branch: main
+    84→Status: clean
+    85→
+    86→<fast_mode_info>
+    87→Fast mode uses the same model with faster output.
+    88→</fast_mode_info>
+    89→"""
+    90→
+    91→SKILLS_REMINDER = """\
+    92→The following skills are available for use with the Skill tool:
+    93→
+    94→- keybindings-help: Use when the user wants to customize keyboard shortcuts.
+    95→- pptx: Presentation creation, editing, and analysis.
+    96→- pdf: Comprehensive PDF manipulation toolkit.
+    97→- algorithmic-art: Creating algorithmic art using p5.js.
+    98→- example-skills:pptx: Presentation creation, editing, and analysis.
+    99→- example-skills:pdf: Comprehensive PDF manipulation toolkit.
+   100→- example-skills:algorithmic-art: Creating algorithmic art using p5.js.
+   101→- document-skills:pptx: Presentation creation, editing, and analysis.
+   102→- document-skills:pdf: Comprehensive PDF manipulation toolkit.
+   103→"""
+   104→
+   105→BUDGET_REMINDER = "USD budget: $0.50/$20; $19.50 remaining"
+   106→
+   107→CLAUDE_MD_REMINDER = """\
+   108→# claudeMd
+   109→Codebase and user instructions are shown below.
+   110→
+   111→Contents of /home/user/project/CLAUDE.md:
+   112→
+   113→# My Project
+   114→Run tests with: uv run pytest
+   115→"""
+   116→
+   117→CURRENT_DATE_REMINDER = "# currentDate\nToday's date is 2026-03-01."
+   118→
+   119→
+   120→def _make_system_blocks(text: str = SYSTEM_PROMPT_TEXT) -> list[dict]:
+   121→    """Build a system prompt block list like the proxy captures."""
+   122→    return [{"type": "text", "text": text}]
+   123→
+   124→
+   125→def _make_user_msg_with_reminders(
+   126→    *reminder_texts: str,
+   127→    user_text: str = "Hello",
+   128→) -> dict:
+   129→    """Build a user message with system-reminder injections."""
+   130→    content = user_text
+   131→    for rt in reminder_texts:
+   132→        content += f"\n<system-reminder>\n{rt}\n</system-reminder>"
+   133→    return {"role": "user", "content": content}
+   134→
+   135→
+   136→def _make_user_msg_with_block_reminders(
+   137→    *reminder_texts: str,
+   138→    user_text: str = "Hello",
+   139→) -> dict:
+   140→    """Build a user message with block-style content including reminders."""
+   141→    blocks: list[dict] = [{"type": "text", "text": user_text}]
+   142→    for rt in reminder_texts:
+   143→        blocks.append({
+   144→            "type": "text",
+   145→            "text": f"<system-reminder>\n{rt}\n</system-reminder>",
+   146→        })
+   147→    return {"role": "user", "content": blocks}
+   148→
+   149→
+   150→def _tool_use(tid: str, name: str, inp: dict) -> dict:
+   151→    return {"type": "tool_use", "id": tid, "name": name, "input": inp}
+   152→
+   153→
+   154→def _tool_result(tid: str, content: str) -> dict:
+   155→    return {"type": "tool_result", "tool_use_id": tid, "content": content}
+   156→
+   157→
+   158→def _make_request(
+   159→    system_prompt_full: list[dict] | None = None,
+   160→    messages_full: list[dict] | None = None,
+   161→    total_request_bytes: int = 50000,
+   162→    system_prompt_bytes: int = 15000,
+   163→    messages_total_bytes: int = 20000,
+   164→    ts: str = "2026-03-01T12:00:00Z",
+   165→) -> dict:
+   166→    """Build a proxy request record with all fields the analyzer expects."""
+   167→    rec: dict = {
+   168→        "type": "request",
+   169→        "timestamp": ts,
+   170→        "model": "claude-opus-4-6",
+   171→        "total_request_bytes": total_request_bytes,
+   172→        "system": {"system_prompt_bytes": system_prompt_bytes},
+   173→        "messages": {"messages_total_bytes": messages_total_bytes},
+   174→    }
+   175→    if system_prompt_full is not None:
+   176→        rec["system_prompt_full"] = system_prompt_full
+   177→    if messages_full is not None:
+   178→        rec["messages_full"] = messages_full
+   179→    return rec
+   180→
+   181→
+   182→# ---------------------------------------------------------------------------
+   183→# (1) Empty log file
+   184→# ---------------------------------------------------------------------------
+   185→
+   186→class TestEmptyLog:
+   187→    def test_returns_zero_api_calls(self, tmp_path):
+   188→        p = _write_jsonl(tmp_path, "empty.jsonl", [])
+   189→        a = analyze_system_prompts(p)
+   190→        assert a.api_calls == 0
+   191→        assert a.total_system_prompt_bytes == 0
+   192→        assert a.total_message_injection_bytes == 0
+   193→        assert a.total_tool_definition_bytes == 0
+   194→        assert a.total_request_bytes == 0
+   195→
+   196→    def test_properties_safe_on_empty(self, tmp_path):
+   197→        p = _write_jsonl(tmp_path, "empty.jsonl", [])
+   198→        a = analyze_system_prompts(p)
+   199→        assert a.static_pct == 0.0
+   200→        assert a.total_overhead_bytes == 0
+   201→        assert a.unused_tool_bytes == 0
+   202→
+   203→    def test_empty_lists(self, tmp_path):
+   204→        p = _write_jsonl(tmp_path, "empty.jsonl", [])
+   205→        a = analyze_system_prompts(p)
+   206→        assert a.component_tracks == []
+   207→        assert a.sample_decomposition == []
+   208→        assert a.duplicate_groups == []
+   209→
+   210→    def test_proxy_log_path_stored(self, tmp_path):
+   211→        p = _write_jsonl(tmp_path, "empty.jsonl", [])
+   212→        a = analyze_system_prompts(p)
+   213→        assert a.proxy_log == str(p)
+   214→
+   215→    def test_non_request_records_ignored(self, tmp_path):
+   216→        """Response and compaction records are not counted as API calls."""
+   217→        records = [
+   218→            {"type": "response", "timestamp": "T1", "usage": {}},
+   219→            {"type": "compaction", "timestamp": "T2"},
+   220→            {"type": "page_faults", "timestamp": "T3"},
+   221→        ]
+   222→        p = _write_jsonl(tmp_path, "misc.jsonl", records)
+   223→        a = analyze_system_prompts(p)
+   224→        assert a.api_calls == 0
+   225→
+   226→
+   227→# ---------------------------------------------------------------------------
+   228→# (2) Log with no system_prompt_full field
+   229→# ---------------------------------------------------------------------------
+   230→
+   231→class TestNoSystemPromptFull:
+   232→    def test_request_without_system_prompt_full(self, tmp_path):
+   233→        """Request records missing system_prompt_full produce zero SP bytes."""
+   234→        rec = {
+   235→            "type": "request",
+   236→            "timestamp": "2026-03-01T12:00:00Z",
+   237→            "model": "claude-opus-4-6",
+   238→            "total_request_bytes": 30000,
+   239→            "system": {"system_prompt_bytes": 10000},
+   240→            "messages": {"messages_total_bytes": 15000},
+   241→            "messages_full": [
+   242→                {"role": "user", "content": "hello"},
+   243→            ],
+   244→        }
+   245→        p = _write_jsonl(tmp_path, "no_sp.jsonl", [rec])
+   246→        a = analyze_system_prompts(p)
+   247→
+   248→        assert a.api_calls == 1
+   249→        assert a.total_system_prompt_bytes == 0
+   250→        # No SP components in sample decomposition
+   251→        sp_items = [
+   252→            d for d in a.sample_decomposition if d["source"] == "system_prompt"
+   253→        ]
+   254→        assert sp_items == []
+   255→
+   256→    def test_system_prompt_full_empty_list(self, tmp_path):
+   257→        """system_prompt_full=[] produces zero SP bytes."""
+   258→        rec = _make_request(
+   259→            system_prompt_full=[],
+   260→            messages_full=[{"role": "user", "content": "hi"}],
+   261→        )
+   262→        p = _write_jsonl(tmp_path, "empty_sp.jsonl", [rec])
+   263→        a = analyze_system_prompts(p)
+   264→
+   265→        assert a.api_calls == 1
+   266→        assert a.total_system_prompt_bytes == 0
+   267→
+   268→    def test_system_prompt_full_block_no_text(self, tmp_path):
+   269→        """Blocks without a 'text' key are skipped."""
+   270→        rec = _make_request(
+   271→            system_prompt_full=[{"type": "text"}],  # missing 'text'
+   272→            messages_full=[{"role": "user", "content": "hi"}],
+   273→        )
+   274→        p = _write_jsonl(tmp_path, "no_text.jsonl", [rec])
+   275→        a = analyze_system_prompts(p)
+   276→
+   277→        assert a.total_system_prompt_bytes == 0
+   278→
+   279→    def test_system_prompt_full_non_dict_block(self, tmp_path):
+   280→        """Non-dict blocks in system_prompt_full are skipped."""
+   281→        rec = _make_request(
+   282→            system_prompt_full=["just a string", 42],
+   283→            messages_full=[{"role": "user", "content": "hi"}],
+   284→        )
+   285→        p = _write_jsonl(tmp_path, "non_dict.jsonl", [rec])
+   286→        a = analyze_system_prompts(p)
+   287→
+   288→        assert a.total_system_prompt_bytes == 0
+   289→
+   290→    def test_messages_with_reminders_still_extracted(self, tmp_path):
+   291→        """Even without system_prompt_full, message injections are extracted."""
+   292→        rec = {
+   293→            "type": "request",
+   294→            "timestamp": "2026-03-01T12:00:00Z",
+   295→            "total_request_bytes": 10000,
+   296→            "system": {"system_prompt_bytes": 0},
+   297→            "messages": {"messages_total_bytes": 5000},
+   298→            "messages_full": [
+   299→                _make_user_msg_with_reminders(BUDGET_REMINDER),
+   300→            ],
+   301→        }
+   302→        p = _write_jsonl(tmp_path, "msg_only.jsonl", [rec])
+   303→        a = analyze_system_prompts(p)
+   304→
+   305→        assert a.total_message_injection_bytes > 0
+   306→        inj_items = [
+   307→            d for d in a.sample_decomposition
+   308→            if d["source"] == "message_injection"
+   309→        ]
+   310→        assert len(inj_items) == 1
+   311→        assert inj_items[0]["name"] == "budget_reminder"
+   312→
+   313→
+   314→# ---------------------------------------------------------------------------
+   315→# (3) Single-turn system prompt decomposition
+   316→# ---------------------------------------------------------------------------
+   317→
+   318→class TestSingleTurnDecomposition:
+   319→    def test_section_splitting(self):
+   320→        """SYSTEM_PROMPT_TEXT is split into the expected sections."""
+   321→        blocks = _make_system_blocks()
+   322→        components = _extract_sp_components(blocks)
+   323→        names = [c.name for c in components]
+   324→
+   325→        # Expected sections from the test prompt
+   326→        assert "agent_identity" in names
+   327→        assert "conversation_instructions" in names
+   328→        assert "system_section" in names
+   329→        assert "doing_tasks" in names
+   330→        assert "executing_actions" in names
+   331→        assert "using_tools" in names
+   332→        assert "tone_and_style" in names
+   333→        assert "auto_memory" in names
+   334→        assert "environment" in names
+   335→        assert "git_status" in names
+   336→        assert "fast_mode" in names
+   337→
+   338→    def test_bytes_are_positive(self):
+   339→        """Every extracted component has positive byte count."""
+   340→        blocks = _make_system_blocks()
+   341→        components = _extract_sp_components(blocks)
+   342→        assert all(c.bytes > 0 for c in components)
+   343→
+   344→    def test_content_hashes_populated(self):
+   345→        """Each component has a non-empty 16-char hex content hash."""
+   346→        blocks = _make_system_blocks()
+   347→        components = _extract_sp_components(blocks)
+   348→        for c in components:
+   349→            assert len(c.content_hash) == 16
+   350→            # hex chars only
+   351→            int(c.content_hash, 16)
+   352→
+   353→    def test_same_text_same_hash(self):
+   354→        """Two components from identical text produce the same hash."""
+   355→        c1 = Component(
+   356→            name="a", source="system_prompt", text="hello", bytes=5,
+   357→        )
+   358→        c2 = Component(
+   359→            name="b", source="system_prompt", text="hello", bytes=5,
+   360→        )
+   361→        assert c1.content_hash == c2.content_hash
+   362→
+   363→    def test_different_text_different_hash(self):
+   364→        c1 = Component(
+   365→            name="a", source="system_prompt", text="hello", bytes=5,
+   366→        )
+   367→        c2 = Component(
+   368→            name="b", source="system_prompt", text="world", bytes=5,
+   369→        )
+   370→        assert c1.content_hash != c2.content_hash
+   371→
+   372→    def test_unsplittable_block_becomes_system_block_N(self):
+   373→        """A block with no recognized headings gets name system_block_<idx>."""
+   374→        blocks = [{"type": "text", "text": "Some random text with no headings."}]
+   375→        components = _extract_sp_components(blocks)
+   376→        assert len(components) == 1
+   377→        assert components[0].name == "system_block_0"
+   378→
+   379→    def test_preamble_captured(self):
+   380→        """Text before the first recognized heading is captured as 'preamble'."""
+   381→        text = "Some preamble text.\n\n# System\nSystem content."
+   382→        sections = _split_into_sections(text)
+   383→        names = [n for n, _ in sections]
+   384→        assert "preamble" in names
+   385→        assert "system_section" in names
+   386→
+   387→    def test_message_injection_extraction(self):
+   388→        """system-reminder blocks in messages are extracted and classified."""
+   389→        messages = [
+   390→            _make_user_msg_with_reminders(
+   391→                SKILLS_REMINDER,
+   392→                BUDGET_REMINDER,
+   393→                CLAUDE_MD_REMINDER,
+   394→            ),
+   395→        ]
+   396→        components = _extract_message_injections(messages)
+   397→        names = [c.name for c in components]
+   398→
+   399→        assert "skills_list" in names
+   400→        assert "budget_reminder" in names
+   401→        assert "claude_md" in names
+   402→        assert all(c.source == "message_injection" for c in components)
+   403→
+   404→    def test_block_style_message_injection(self):
+   405→        """Injections work with block-style (list) message content too."""
+   406→        messages = [
+   407→            _make_user_msg_with_block_reminders(BUDGET_REMINDER),
+   408→        ]
+   409→        components = _extract_message_injections(messages)
+   410→        assert len(components) == 1
+   411→        assert components[0].name == "budget_reminder"
+   412→
+   413→    def test_current_date_classified(self):
+   414→        components = _extract_message_injections([
+   415→            _make_user_msg_with_reminders(CURRENT_DATE_REMINDER),
+   416→        ])
+   417→        assert components[0].name == "current_date"
+   418→
+   419→    def test_unknown_reminder_classified(self):
+   420→        """Unrecognized reminder content gets name 'unknown_reminder'."""
+   421→        components = _extract_message_injections([
+   422→            _make_user_msg_with_reminders("Some unrecognized content here"),
+   423→        ])
+   424→        assert components[0].name == "unknown_reminder"
+   425→
+   426→    def test_empty_reminder_skipped(self):
+   427→        """Empty system-reminder blocks produce no components."""
+   428→        msg = {"role": "user", "content": "<system-reminder>\n\n</system-reminder>"}
+   429→        components = _extract_message_injections([msg])
+   430→        assert components == []
+   431→
+   432→    def test_full_turn_decomposition_in_analysis(self, tmp_path):
+   433→        """analyze_system_prompts populates sample_decomposition on first turn."""
+   434→        rec = _make_request(
+   435→            system_prompt_full=_make_system_blocks(),
+   436→            messages_full=[
+   437→                _make_user_msg_with_reminders(SKILLS_REMINDER, BUDGET_REMINDER),
+   438→            ],
+   439→        )
+   440→        p = _write_jsonl(tmp_path, "decomp.jsonl", [rec])
+   441→        a = analyze_system_prompts(p)
+   442→
+   443→        assert len(a.sample_decomposition) > 0
+   444→        # Should have both sources
+   445→        sources = {d["source"] for d in a.sample_decomposition}
+   446→        assert "system_prompt" in sources
+   447→        assert "message_injection" in sources
+   448→
+   449→        # Each entry has name, source, bytes
+   450→        for d in a.sample_decomposition:
+   451→            assert "name" in d
+   452→            assert "source" in d
+   453→            assert "bytes" in d
+   454→            assert d["bytes"] > 0
+   455→
+   456→    def test_multiple_system_blocks(self):
+   457→        """Multiple system prompt blocks are each decomposed."""
+   458→        blocks = [
+   459→            {"type": "text", "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK."},
+   460→            {"type": "text", "text": "Some extra block with no known sections."},
+   461→        ]
+   462→        components = _extract_sp_components(blocks)
+   463→        assert len(components) == 2
+   464→        assert components[0].name == "agent_identity"
+   465→        assert components[1].name == "system_block_1"
+   466→
+   467→
+   468→# ---------------------------------------------------------------------------
+   469→# (4) Multi-turn static vs dynamic detection
+   470→# ---------------------------------------------------------------------------
+   471→
+   472→class TestStaticVsDynamic:
+   473→    def _two_turn_log(self, tmp_path, sp_text_1, sp_text_2):
+   474→        """Create a 2-turn log with different system prompts."""
+   475→        rec1 = _make_request(
+   476→            system_prompt_full=_make_system_blocks(sp_text_1),
+   477→            messages_full=[{"role": "user", "content": "turn 1"}],
+   478→            ts="2026-03-01T12:00:00Z",
+   479→        )
+   480→        rec2 = _make_request(
+   481→            system_prompt_full=_make_system_blocks(sp_text_2),
+   482→            messages_full=[{"role": "user", "content": "turn 2"}],
+   483→            ts="2026-03-01T12:01:00Z",
+   484→        )
+   485→        return _write_jsonl(tmp_path, "multi.jsonl", [rec1, rec2])
+   486→
+   487→    def test_identical_prompts_are_static(self, tmp_path):
+   488→        """When SP is identical across turns, all components are static."""
+   489→        p = self._two_turn_log(
+   490→            tmp_path, SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_TEXT,
+   491→        )
+   492→        a = analyze_system_prompts(p)
+   493→
+   494→        assert a.api_calls == 2
+   495→        for track in a.component_tracks:
+   496→            assert track.is_static, f"{track.name} should be static"
+   497→            assert track.change_count == 0
+   498→            assert track.turns_present == 2
+   499→        assert a.dynamic_bytes == 0
+   500→        assert a.static_bytes > 0
+   501→
+   502→    def test_changed_git_status_is_dynamic(self, tmp_path):
+   503→        """When git status changes between turns, that section is dynamic."""
+   504→        sp1 = SYSTEM_PROMPT_TEXT
+   505→        sp2 = SYSTEM_PROMPT_TEXT.replace(
+   506→            "Status: clean",
+   507→            "Status:\n?? newfile.py",
+   508→        )
+   509→        p = self._two_turn_log(tmp_path, sp1, sp2)
+   510→        a = analyze_system_prompts(p)
+   511→
+   512→        track_by_name = {t.name: t for t in a.component_tracks}
+   513→        git_track = track_by_name.get("git_status")
+   514→        assert git_track is not None
+   515→        assert not git_track.is_static
+   516→        assert git_track.change_count == 1
+   517→
+   518→        # Other sections should still be static
+   519→        for name in ["agent_identity", "system_section", "doing_tasks"]:
+   520→            t = track_by_name.get(name)
+   521→            if t:
+   522→                assert t.is_static, f"{name} should be static"
+   523→
+   524→    def test_static_wasted_bytes(self, tmp_path):
+   525→        """Static re-send waste = sum of sizes[1:] for static components."""
+   526→        p = self._two_turn_log(
+   527→            tmp_path, SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_TEXT,
+   528→        )
+   529→        a = analyze_system_prompts(p)
+   530→
+   531→        # Every component appears twice; the second send is wasted
+   532→        assert a.static_wasted_bytes > 0
+   533→        # Wasted should equal roughly the same as the first turn's SP bytes
+   534→        assert a.static_wasted_bytes == pytest.approx(
+   535→            a.total_system_prompt_bytes / 2, rel=0.01,
+   536→        )
+   537→
+   538→    def test_dynamic_content_not_counted_as_wasted(self, tmp_path):
+   539→        """Changed content doesn't contribute to static_wasted_bytes."""
+   540→        sp1 = SYSTEM_PROMPT_TEXT
+   541→        sp2 = SYSTEM_PROMPT_TEXT.replace(
+   542→            "Status: clean",
+   543→            "Status:\n?? newfile.py",
+   544→        )
+   545→        p = self._two_turn_log(tmp_path, sp1, sp2)
+   546→        a = analyze_system_prompts(p)
+   547→
+   548→        # dynamic_bytes should be nonzero (git_status appears twice, different)
+   549→        assert a.dynamic_bytes > 0
+   550→        # The static wasted should NOT include the git_status bytes
+   551→        track_by_name = {t.name: t for t in a.component_tracks}
+   552→        git_track = track_by_name["git_status"]
+   553→        assert git_track.wasted_bytes == 0
+   554→
+   555→    def test_static_pct(self, tmp_path):
+   556→        """static_pct = static_bytes / (static + dynamic)."""
+   557→        p = self._two_turn_log(
+   558→            tmp_path, SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_TEXT,
+   559→        )
+   560→        a = analyze_system_prompts(p)
+   561→
+   562→        # All static → 100%
+   563→        assert a.static_pct == pytest.approx(1.0)
+   564→
+   565→    def test_component_tracks_sorted_by_total_bytes(self, tmp_path):
+   566→        """component_tracks are sorted descending by total_bytes_sent."""
+   567→        p = self._two_turn_log(
+   568→            tmp_path, SYSTEM_PROMPT_TEXT, SYSTEM_PROMPT_TEXT,
+   569→        )
+   570→        a = analyze_system_prompts(p)
+   571→
+   572→        sizes = [t.total_bytes_sent for t in a.component_tracks]
+   573→        assert sizes == sorted(sizes, reverse=True)
+   574→
+   575→    def test_three_turns_one_change(self, tmp_path):
+   576→        """3 turns: SP identical in turns 1&2, changes in turn 3."""
+   577→        sp_changed = SYSTEM_PROMPT_TEXT.replace("Platform: linux", "Platform: darwin")
+   578→        recs = [
+   579→            _make_request(
+   580→                system_prompt_full=_make_system_blocks(SYSTEM_PROMPT_TEXT),
+   581→                messages_full=[{"role": "user", "content": "t1"}],
+   582→                ts="2026-03-01T12:00:00Z",
+   583→            ),
+   584→            _make_request(
+   585→                system_prompt_full=_make_system_blocks(SYSTEM_PROMPT_TEXT),
+   586→                messages_full=[{"role": "user", "content": "t2"}],
+   587→                ts="2026-03-01T12:01:00Z",
+   588→            ),
+   589→            _make_request(
+   590→                system_prompt_full=_make_system_blocks(sp_changed),
+   591→                messages_full=[{"role": "user", "content": "t3"}],
+   592→                ts="2026-03-01T12:02:00Z",
+   593→            ),
+   594→        ]
+   595→        p = _write_jsonl(tmp_path, "three.jsonl", recs)
+   596→        a = analyze_system_prompts(p)
+   597→
+   598→        track_by_name = {t.name: t for t in a.component_tracks}
+   599→        env_track = track_by_name.get("environment")
+   600→        assert env_track is not None
+   601→        assert env_track.turns_present == 3
+   602→        assert env_track.change_count == 1
+   603→        assert not env_track.is_static
+   604→
+   605→
+   606→# ---------------------------------------------------------------------------
+   607→# (5) Tool usage tracking with used and unused tools
+   608→# ---------------------------------------------------------------------------
+   609→
+   610→class TestToolUsageTracking:
+   611→    def test_used_tools_counted(self, tmp_path):
+   612→        """Tools appearing in messages_full are counted correctly."""
+   613→        rec = _make_request(
+   614→            system_prompt_full=_make_system_blocks(),
+   615→            messages_full=[
+   616→                {"role": "user", "content": "do something"},
+   617→                {"role": "assistant", "content": [
+   618→                    _tool_use("tu_1", "Read", {"file_path": "/foo.py"}),
+   619→                ]},
+   620→                {"role": "user", "content": [
+   621→                    _tool_result("tu_1", "file contents here"),
+   622→                ]},
+   623→                {"role": "assistant", "content": [
+   624→                    _tool_use("tu_2", "Grep", {"pattern": "TODO"}),
+   625→                ]},
+   626→                {"role": "user", "content": [
+   627→                    _tool_result("tu_2", "line 10: TODO fix this"),
+   628→                ]},
+   629→                {"role": "assistant", "content": [
+   630→                    _tool_use("tu_3", "Read", {"file_path": "/bar.py"}),
+   631→                ]},
+   632→                {"role": "user", "content": [
+   633→                    _tool_result("tu_3", "bar contents"),
+   634→                ]},
+   635→            ],
+   636→        )
+   637→        p = _write_jsonl(tmp_path, "tools.jsonl", [rec])
+   638→        a = analyze_system_prompts(p)
+   639→
+   640→        assert "Read" in a.tool_usage.used_tools
+   641→        assert "Grep" in a.tool_usage.used_tools
+   642→        assert a.tool_usage.tool_use_counts["Read"] == 2
+   643→        assert a.tool_usage.tool_use_counts["Grep"] == 1
+   644→
+   645→    def test_unused_tools_identified(self, tmp_path):
+   646→        """Tools in _KNOWN_TOOLS but not used are listed as unused."""
+   647→        rec = _make_request(
+   648→            system_prompt_full=_make_system_blocks(),
+   649→            messages_full=[
+   650→                {"role": "user", "content": "hi"},
+   651→                {"role": "assistant", "content": [
+   652→                    _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+   653→                ]},
+   654→                {"role": "user", "content": [
+   655→                    _tool_result("tu_1", "data"),
+   656→                ]},
+   657→            ],
+   658→        )
+   659→        p = _write_jsonl(tmp_path, "unused.jsonl", [rec])
+   660→        a = analyze_system_prompts(p)
+   661→
+   662→        assert "Read" not in a.tool_usage.unused_tools
+   663→        assert "Bash" in a.tool_usage.unused_tools
+   664→        assert "Write" in a.tool_usage.unused_tools
+   665→        assert "WebFetch" in a.tool_usage.unused_tools
+   666→
+   667→    def test_no_tool_usage_all_unused(self, tmp_path):
+   668→        """When no tools are used, all known tools are unused."""
+   669→        rec = _make_request(
+   670→            system_prompt_full=_make_system_blocks(),
+   671→            messages_full=[{"role": "user", "content": "hello"}],
+   672→        )
+   673→        p = _write_jsonl(tmp_path, "no_tools.jsonl", [rec])
+   674→        a = analyze_system_prompts(p)
+   675→
+   676→        assert a.tool_usage.used_tools == []
+   677→        assert len(a.tool_usage.unused_tools) == len(a.tool_usage.defined_tools)
+   678→
+   679→    def test_tool_definition_bytes_inferred(self, tmp_path):
+   680→        """Tool def bytes = gap between total_request and (system + messages)."""
+   681→        # total=50000, system=15000, messages=20000 → gap=15000
+   682→        rec = _make_request(
+   683→            system_prompt_full=_make_system_blocks(),
+   684→            messages_full=[{"role": "user", "content": "hi"}],
+   685→            total_request_bytes=50000,
+   686→            system_prompt_bytes=15000,
+   687→            messages_total_bytes=20000,
+   688→        )
+   689→        p = _write_jsonl(tmp_path, "gap.jsonl", [rec])
+   690→        a = analyze_system_prompts(p)
+   691→
+   692→        assert a.tool_usage.tool_definition_bytes == 15000
+   693→
+   694→    def test_tool_definition_bytes_median(self, tmp_path):
+   695→        """With multiple requests, the median gap is used."""
+   696→        recs = [
+   697→            _make_request(
+   698→                system_prompt_full=_make_system_blocks(),
+   699→                messages_full=[{"role": "user", "content": "t1"}],
+   700→                total_request_bytes=50000,
+   701→                system_prompt_bytes=15000,
+   702→                messages_total_bytes=20000,
+   703→                ts="2026-03-01T12:00:00Z",
+   704→            ),
+   705→            _make_request(
+   706→                system_prompt_full=_make_system_blocks(),
+   707→                messages_full=[{"role": "user", "content": "t2"}],
+   708→                total_request_bytes=52000,
+   709→                system_prompt_bytes=15000,
+   710→                messages_total_bytes=22000,
+   711→                ts="2026-03-01T12:01:00Z",
+   712→            ),
+   713→            _make_request(
+   714→                system_prompt_full=_make_system_blocks(),
+   715→                messages_full=[{"role": "user", "content": "t3"}],
+   716→                total_request_bytes=99999,  # outlier
+   717→                system_prompt_bytes=15000,
+   718→                messages_total_bytes=20000,
+   719→                ts="2026-03-01T12:02:00Z",
+   720→            ),
+   721→        ]
+   722→        p = _write_jsonl(tmp_path, "median.jsonl", recs)
+   723→        a = analyze_system_prompts(p)
+   724→
+   725→        # Gaps: 15000, 15000, 64999 → sorted: [15000, 15000, 64999] → median idx 1 = 15000
+   726→        assert a.tool_usage.tool_definition_bytes == 15000
+   727→
+   728→    def test_total_tool_definition_bytes_scaled(self, tmp_path):
+   729→        """total_tool_definition_bytes = per-request bytes * api_calls."""
+   730→        recs = [
+   731→            _make_request(
+   732→                system_prompt_full=_make_system_blocks(),
+   733→                messages_full=[{"role": "user", "content": f"t{i}"}],
+   734→                total_request_bytes=50000,
+   735→                system_prompt_bytes=15000,
+   736→                messages_total_bytes=20000,
+   737→                ts=f"2026-03-01T12:0{i}:00Z",
+   738→            )
+   739→            for i in range(3)
+   740→        ]
+   741→        p = _write_jsonl(tmp_path, "scaled.jsonl", recs)
+   742→        a = analyze_system_prompts(p)
+   743→
+   744→        assert a.total_tool_definition_bytes == 15000 * 3
+   745→
+   746→    def test_unused_tool_bytes_estimate(self, tmp_path):
+   747→        """unused_tool_bytes = (per_tool_bytes * n_unused)."""
+   748→        rec = _make_request(
+   749→            system_prompt_full=_make_system_blocks(),
+   750→            messages_full=[
+   751→                {"role": "user", "content": "hi"},
+   752→                {"role": "assistant", "content": [
+   753→                    _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+   754→                ]},
+   755→                {"role": "user", "content": [
+   756→                    _tool_result("tu_1", "data"),
+   757→                ]},
+   758→            ],
+   759→            total_request_bytes=50000,
+   760→            system_prompt_bytes=15000,
+   761→            messages_total_bytes=20000,
+   762→        )
+   763→        p = _write_jsonl(tmp_path, "est.jsonl", [rec])
+   764→        a = analyze_system_prompts(p)
+   765→
+   766→        n_defined = len(a.tool_usage.defined_tools)
+   767→        n_unused = len(a.tool_usage.unused_tools)
+   768→        per_tool = a.tool_usage.tool_definition_bytes / n_defined
+   769→        expected = int(per_tool * n_unused)
+   770→        assert a.unused_tool_bytes == expected
+   771→
+   772→    def test_collect_tool_uses_skips_non_request(self):
+   773→        """_collect_tool_uses only processes request records."""
+   774→        records = [
+   775→            {"type": "response", "messages_full": [
+   776→                {"role": "assistant", "content": [
+   777→                    _tool_use("tu_1", "Read", {}),
+   778→                ]},
+   779→            ]},
+   780→        ]
+   781→        counts = _collect_tool_uses(records)
+   782→        assert counts == {}
+   783→
+   784→    def test_collect_tool_uses_string_content_skipped(self):
+   785→        """Messages with string content (not list) are safely skipped."""
+   786→        records = [
+   787→            {"type": "request", "messages_full": [
+   788→                {"role": "assistant", "content": "just text"},
+   789→            ]},
+   790→        ]
+   791→        counts = _collect_tool_uses(records)
+   792→        assert counts == {}
+   793→
+   794→
+   795→# ---------------------------------------------------------------------------
+   796→# (6) Duplicate skill detection
+   797→# ---------------------------------------------------------------------------
+   798→
+   799→class TestDuplicateSkillDetection:
+   800→    def test_detects_duplicate_skills(self):
+   801→        """Skills with the same base name under different prefixes are dupes."""
+   802→        comp = Component(
+   803→            name="skills_list",
+   804→            source="message_injection",
+   805→            text=SKILLS_REMINDER,
+   806→            bytes=len(SKILLS_REMINDER.encode("utf-8")),
+   807→        )
+   808→        groups = _find_duplicate_skills([comp])
+   809→
+   810→        # pptx appears as: pptx, example-skills:pptx, document-skills:pptx
+   811→        # pdf appears as: pdf, example-skills:pdf, document-skills:pdf
+   812→        # algorithmic-art: algorithmic-art, example-skills:algorithmic-art
+   813→        group_names = {g.canonical_name for g in groups}
+   814→        assert "pptx" in group_names
+   815→        assert "pdf" in group_names
+   816→        assert "algorithmic-art" in group_names
+   817→
+   818→    def test_duplicate_group_members(self):
+   819→        """Each duplicate group lists all the full names."""
+   820→        comp = Component(
+   821→            name="skills_list",
+   822→            source="message_injection",
+   823→            text=SKILLS_REMINDER,
+   824→            bytes=len(SKILLS_REMINDER.encode("utf-8")),
+   825→        )
+   826→        groups = _find_duplicate_skills([comp])
+   827→        by_name = {g.canonical_name: g for g in groups}
+   828→
+   829→        pptx_group = by_name["pptx"]
+   830→        assert "pptx" in pptx_group.members
+   831→        assert "example-skills:pptx" in pptx_group.members
+   832→        assert "document-skills:pptx" in pptx_group.members
+   833→        assert len(pptx_group.members) == 3
+   834→
+   835→    def test_duplicate_bytes_calculated(self):
+   836→        """duplicate_bytes = total_bytes - instance_bytes."""
+   837→        comp = Component(
+   838→            name="skills_list",
+   839→            source="message_injection",
+   840→            text=SKILLS_REMINDER,
+   841→            bytes=len(SKILLS_REMINDER.encode("utf-8")),
+   842→        )
+   843→        groups = _find_duplicate_skills([comp])
+   844→        for g in groups:
+   845→            assert g.duplicate_bytes == g.total_bytes - g.instance_bytes
+   846→            assert g.duplicate_bytes > 0
+   847→
+   848→    def test_no_duplicates_when_unique_skills(self):
+   849→        """Skills with unique base names produce no duplicate groups."""
+   850→        text = """\
+   851→- keybindings-help: Customize keyboard shortcuts.
+   852→- pptx: Presentation creation.
+   853→- pdf: PDF manipulation.
+   854→"""
+   855→        comp = Component(
+   856→            name="skills_list",
+   857→            source="message_injection",
+   858→            text=text,
+   859→            bytes=len(text.encode("utf-8")),
+   860→        )
+   861→        groups = _find_duplicate_skills([comp])
+   862→        assert groups == []
+   863→
+   864→    def test_non_skills_components_ignored(self):
+   865→        """Only components named 'skills_list' are checked for duplicates."""
+   866→        comp = Component(
+   867→            name="budget_reminder",
+   868→            source="message_injection",
+   869→            text=SKILLS_REMINDER,  # same text, wrong name
+   870→            bytes=len(SKILLS_REMINDER.encode("utf-8")),
+   871→        )
+   872→        groups = _find_duplicate_skills([comp])
+   873→        assert groups == []
+   874→
+   875→    def test_extract_skill_entries(self):
+   876→        """_extract_skill_entries parses skill names correctly."""
+   877→        entries = _extract_skill_entries(SKILLS_REMINDER)
+   878→        full_names = [e[0] for e in entries]
+   879→        base_names = [e[1] for e in entries]
+   880→
+   881→        assert "keybindings-help" in full_names
+   882→        assert "example-skills:pptx" in full_names
+   883→        assert "pptx" in base_names
+   884→        assert "pdf" in base_names
+   885→
+   886→    def test_extract_skill_entries_colon_split(self):
+   887→        """Base name is the part after the last colon."""
+   888→        entries = _extract_skill_entries(
+   889→            "- foo:bar:baz: Some description."
+   890→        )
+   891→        assert entries[0] == ("foo:bar:baz", "baz")
+   892→
+   893→    def test_duplicate_detection_in_full_analysis(self, tmp_path):
+   894→        """analyze_system_prompts populates duplicate_groups from messages."""
+   895→        rec = _make_request(
+   896→            system_prompt_full=_make_system_blocks(),
+   897→            messages_full=[
+   898→                _make_user_msg_with_reminders(SKILLS_REMINDER),
+   899→            ],
+   900→        )
+   901→        p = _write_jsonl(tmp_path, "dupes.jsonl", [rec])
+   902→        a = analyze_system_prompts(p)
+   903→
+   904→        assert len(a.duplicate_groups) > 0
+   905→        assert a.duplicate_bytes > 0
+   906→
+   907→    def test_duplicates_only_from_first_turn(self, tmp_path):
+   908→        """Duplicate detection uses only the first turn's message injections."""
+   909→        no_dupes_skills = """\
+   910→- unique-skill-a: Does A.
+   911→- unique-skill-b: Does B.
+   912→"""
+   913→        recs = [
+   914→            _make_request(
+   915→                system_prompt_full=_make_system_blocks(),
+   916→                messages_full=[
+   917→                    _make_user_msg_with_reminders(no_dupes_skills),
+   918→                ],
+   919→                ts="2026-03-01T12:00:00Z",
+   920→            ),
+   921→            _make_request(
+   922→                system_prompt_full=_make_system_blocks(),
+   923→                messages_full=[
+   924→                    _make_user_msg_with_reminders(SKILLS_REMINDER),
+   925→                ],
+   926→                ts="2026-03-01T12:01:00Z",
+   927→            ),
+   928→        ]
+   929→        p = _write_jsonl(tmp_path, "first_only.jsonl", recs)
+   930→        a = analyze_system_prompts(p)
+   931→
+   932→        # Turn 1 has no dupes, so even though turn 2 has dupes, groups = []
+   933→        assert a.duplicate_groups == []
+   934→        assert a.duplicate_bytes == 0
+   935→
+   936→
+   937→# ---------------------------------------------------------------------------
+   938→# (7) Session summary percentage calculations
+   939→# ---------------------------------------------------------------------------
+   940→
+   941→class TestSessionSummaryPercentages:
+   942→    def test_static_pct_all_static(self):
+   943→        """100% static when all content is identical across turns."""
+   944→        a = SessionAnalysis(proxy_log="x", static_bytes=1000, dynamic_bytes=0)
+   945→        assert a.static_pct == pytest.approx(1.0)
+   946→
+   947→    def test_static_pct_all_dynamic(self):
+   948→        a = SessionAnalysis(proxy_log="x", static_bytes=0, dynamic_bytes=1000)
+   949→        assert a.static_pct == pytest.approx(0.0)
+   950→
+   951→    def test_static_pct_mixed(self):
+   952→        a = SessionAnalysis(proxy_log="x", static_bytes=750, dynamic_bytes=250)
+   953→        assert a.static_pct == pytest.approx(0.75)
+   954→
+   955→    def test_static_pct_zero_zero(self):
+   956→        a = SessionAnalysis(proxy_log="x", static_bytes=0, dynamic_bytes=0)
+   957→        assert a.static_pct == 0.0
+   958→
+   959→    def test_total_overhead_bytes(self):
+   960→        a = SessionAnalysis(
+   961→            proxy_log="x",
+   962→            total_system_prompt_bytes=10000,
+   963→            total_message_injection_bytes=5000,
+   964→            total_tool_definition_bytes=8000,
+   965→        )
+   966→        assert a.total_overhead_bytes == 23000
+   967→
+   968→    def test_unused_tool_bytes_with_data(self):
+   969→        a = SessionAnalysis(
+   970→            proxy_log="x",
+   971→            tool_usage=ToolUsageReport(
+   972→                defined_tools=["A", "B", "C", "D"],
+   973→                used_tools=["A"],
+   974→                unused_tools=["B", "C", "D"],
+   975→                tool_definition_bytes=4000,
+   976→            ),
+   977→        )
+   978→        # per_tool = 4000/4 = 1000, unused = 3 → 3000
+   979→        assert a.unused_tool_bytes == 3000
+   980→
+   981→    def test_unused_tool_bytes_no_tools(self):
+   982→        a = SessionAnalysis(proxy_log="x")
+   983→        assert a.unused_tool_bytes == 0
+   984→
+   985→    def test_unused_tool_bytes_all_used(self):
+   986→        a = SessionAnalysis(
+   987→            proxy_log="x",
+   988→            tool_usage=ToolUsageReport(
+   989→                defined_tools=["A", "B"],
+   990→                used_tools=["A", "B"],
+   991→                unused_tools=[],
+   992→                tool_definition_bytes=2000,
+   993→            ),
+   994→        )
+   995→        assert a.unused_tool_bytes == 0
+   996→
+   997→    def test_component_track_properties(self):
+   998→        """ComponentTrack computed properties are correct."""
+   999→        track = ComponentTrack(
+  1000→            name="test",
+  1001→            hashes=["aaa", "aaa", "aaa"],
+  1002→            sizes=[100, 100, 100],
+  1003→        )
+  1004→        assert track.is_static is True
+  1005→        assert track.total_bytes_sent == 300
+  1006→        assert track.unique_bytes == 100
+  1007→        assert track.wasted_bytes == 200
+  1008→        assert track.turns_present == 3
+  1009→        assert track.change_count == 0
+  1010→
+  1011→    def test_component_track_dynamic(self):
+  1012→        track = ComponentTrack(
+  1013→            name="test",
+  1014→            hashes=["aaa", "bbb", "aaa"],
+  1015→            sizes=[100, 120, 100],
+  1016→        )
+  1017→        assert track.is_static is False
+  1018→        assert track.wasted_bytes == 0  # not static → no wasted
+  1019→        assert track.change_count == 2  # aaa→bbb, bbb→aaa
+  1020→
+  1021→    def test_component_track_empty(self):
+  1022→        track = ComponentTrack(name="empty")
+  1023→        assert track.is_static is True  # empty set has <= 1 unique
+  1024→        assert track.total_bytes_sent == 0
+  1025→        assert track.unique_bytes == 0
+  1026→        assert track.wasted_bytes == 0
+  1027→        assert track.turns_present == 0
+  1028→        assert track.change_count == 0
+  1029→
+  1030→    def test_component_track_single_turn(self):
+  1031→        track = ComponentTrack(
+  1032→            name="once", hashes=["abc"], sizes=[500],
+  1033→        )
+  1034→        assert track.is_static is True
+  1035→        assert track.wasted_bytes == 0  # only 1 send, nothing wasted
+  1036→        assert track.unique_bytes == 500
+  1037→
+  1038→    def test_duplicate_group_properties(self):
+  1039→        g = DuplicateGroup(
+  1040→            canonical_name="pdf",
+  1041→            members=["pdf", "example-skills:pdf", "document-skills:pdf"],
+  1042→            instance_bytes=200,
+  1043→            total_bytes=600,
+  1044→        )
+  1045→        assert g.duplicate_bytes == 400
+  1046→
+  1047→    def test_duplicate_group_single_member(self):
+  1048→        """A group with one member has no duplicate bytes."""
+  1049→        g = DuplicateGroup(
+  1050→            canonical_name="unique",
+  1051→            members=["unique"],
+  1052→            instance_bytes=200,
+  1053→            total_bytes=200,
+  1054→        )
+  1055→        assert g.duplicate_bytes == 0
+  1056→
+  1057→    def test_full_session_summary_integration(self, tmp_path):
+  1058→        """End-to-end: check that summary fields are populated correctly."""
+  1059→        recs = [
+  1060→            _make_request(
+  1061→                system_prompt_full=_make_system_blocks(),
+  1062→                messages_full=[
+  1063→                    _make_user_msg_with_reminders(SKILLS_REMINDER, BUDGET_REMINDER),
+  1064→                    {"role": "assistant", "content": [
+  1065→                        _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+  1066→                    ]},
+  1067→                    {"role": "user", "content": [
+  1068→                        _tool_result("tu_1", "file data"),
+  1069→                    ]},
+  1070→                ],
+  1071→                total_request_bytes=50000,
+  1072→                system_prompt_bytes=15000,
+  1073→                messages_total_bytes=20000,
+  1074→                ts="2026-03-01T12:00:00Z",
+  1075→            ),
+  1076→            _make_request(
+  1077→                system_prompt_full=_make_system_blocks(),
+  1078→                messages_full=[
+  1079→                    _make_user_msg_with_reminders(SKILLS_REMINDER, BUDGET_REMINDER),
+  1080→                    {"role": "assistant", "content": [
+  1081→                        _tool_use("tu_2", "Bash", {"command": "ls"}),
+  1082→                    ]},
+  1083→                    {"role": "user", "content": [
+  1084→                        _tool_result("tu_2", "file1\nfile2"),
+  1085→                    ]},
+  1086→                ],
+  1087→                total_request_bytes=55000,
+  1088→                system_prompt_bytes=15000,
+  1089→                messages_total_bytes=25000,
+  1090→                ts="2026-03-01T12:01:00Z",
+  1091→            ),
+  1092→        ]
+  1093→        p = _write_jsonl(tmp_path, "full.jsonl", recs)
+  1094→        a = analyze_system_prompts(p)
+  1095→
+  1096→        assert a.api_calls == 2
+  1097→        assert a.total_system_prompt_bytes > 0
+  1098→        assert a.total_message_injection_bytes > 0
+  1099→        assert a.total_tool_definition_bytes > 0
+  1100→        assert a.total_request_bytes == 50000 + 55000
+  1101→        assert a.total_overhead_bytes == (
+  1102→            a.total_system_prompt_bytes
+  1103→            + a.total_message_injection_bytes
+  1104→            + a.total_tool_definition_bytes
+  1105→        )
+  1106→        assert "Read" in a.tool_usage.used_tools
+  1107→        assert "Bash" in a.tool_usage.used_tools
+  1108→        assert a.tool_usage.tool_use_counts["Read"] == 1
+  1109→        assert a.tool_usage.tool_use_counts["Bash"] == 1
+  1110→
+  1111→
+  1112→# ---------------------------------------------------------------------------
+  1113→# (8) CLI entry point with --json flag
+  1114→# ---------------------------------------------------------------------------
+  1115→
+  1116→class TestCLIEntryPoint:
+  1117→    def test_json_output(self, tmp_path, capsys, monkeypatch):
+  1118→        """--json outputs valid JSON with expected fields."""
+  1119→        rec = _make_request(
+  1120→            system_prompt_full=_make_system_blocks(),
+  1121→            messages_full=[
+  1122→                _make_user_msg_with_reminders(SKILLS_REMINDER, BUDGET_REMINDER),
+  1123→                {"role": "assistant", "content": [
+  1124→                    _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+  1125→                ]},
+  1126→                {"role": "user", "content": [
+  1127→                    _tool_result("tu_1", "data"),
+  1128→                ]},
+  1129→            ],
+  1130→        )
+  1131→        p = _write_jsonl(tmp_path, "cli.jsonl", [rec])
+  1132→
+  1133→        monkeypatch.setattr(sys, "argv", ["analyzer", "--json", str(p)])
+  1134→        main()
+  1135→
+  1136→        out = capsys.readouterr().out.strip()
+  1137→        data = json.loads(out)
+  1138→        assert data["proxy_log"] == str(p)
+  1139→        assert data["api_calls"] == 1
+  1140→        assert "total_system_prompt_bytes" in data
+  1141→        assert "total_message_injection_bytes" in data
+  1142→        assert "total_tool_definition_bytes" in data
+  1143→        assert "tool_usage" in data
+  1144→        assert "duplicate_groups" in data
+  1145→
+  1146→    def test_json_trims_sample_decomposition(self, tmp_path, capsys, monkeypatch):
+  1147→        """--json removes sample_decomposition from output."""
+  1148→        rec = _make_request(
+  1149→            system_prompt_full=_make_system_blocks(),
+  1150→            messages_full=[{"role": "user", "content": "hi"}],
+  1151→        )
+  1152→        p = _write_jsonl(tmp_path, "trim.jsonl", [rec])
+  1153→
+  1154→        monkeypatch.setattr(sys, "argv", ["analyzer", "--json", str(p)])
+  1155→        main()
+  1156→
+  1157→        data = json.loads(capsys.readouterr().out.strip())
+  1158→        assert "sample_decomposition" not in data
+  1159→
+  1160→    def test_json_component_tracks_flattened(self, tmp_path, capsys, monkeypatch):
+  1161→        """--json flattens component_tracks to summary dicts."""
+  1162→        rec = _make_request(
+  1163→            system_prompt_full=_make_system_blocks(),
+  1164→            messages_full=[{"role": "user", "content": "hi"}],
+  1165→        )
+  1166→        p = _write_jsonl(tmp_path, "flat.jsonl", [rec])
+  1167→
+  1168→        monkeypatch.setattr(sys, "argv", ["analyzer", "--json", str(p)])
+  1169→        main()
+  1170→
+  1171→        data = json.loads(capsys.readouterr().out.strip())
+  1172→        tracks = data["component_tracks"]
+  1173→        assert isinstance(tracks, list)
+  1174→        for t in tracks:
+  1175→            assert "name" in t
+  1176→            assert "total_bytes_sent" in t
+  1177→            assert "turns_present" in t
+  1178→            assert "is_static" in t
+  1179→            assert "change_count" in t
+  1180→            # Should NOT have raw hashes/sizes
+  1181→            assert "hashes" not in t
+  1182→            assert "sizes" not in t
+  1183→
+  1184→    def test_human_readable_output(self, tmp_path, capsys, monkeypatch):
+  1185→        """Without --json, output contains human-readable sections."""
+  1186→        rec = _make_request(
+  1187→            system_prompt_full=_make_system_blocks(),
+  1188→            messages_full=[
+  1189→                _make_user_msg_with_reminders(SKILLS_REMINDER),
+  1190→                {"role": "assistant", "content": [
+  1191→                    _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+  1192→                ]},
+  1193→                {"role": "user", "content": [
+  1194→                    _tool_result("tu_1", "data"),
+  1195→                ]},
+  1196→            ],
+  1197→        )
+  1198→        p = _write_jsonl(tmp_path, "human.jsonl", [rec])
+  1199→
+  1200→        monkeypatch.setattr(sys, "argv", ["analyzer", str(p)])
+  1201→        main()
+  1202→
+  1203→        out = capsys.readouterr().out
+  1204→        assert "SYSTEM PROMPT WASTE ANALYSIS" in out
+  1205→        assert "Component Decomposition" in out
+  1206→        assert "Static vs Dynamic" in out
+  1207→        assert "Tool Usage" in out
+  1208→        assert "Session Summary" in out
+  1209→
+  1210→    def test_human_readable_shows_duplicates(self, tmp_path, capsys, monkeypatch):
+  1211→        """Human-readable output includes duplicate section when dupes exist."""
+  1212→        rec = _make_request(
+  1213→            system_prompt_full=_make_system_blocks(),
+  1214→            messages_full=[
+  1215→                _make_user_msg_with_reminders(SKILLS_REMINDER),
+  1216→            ],
+  1217→        )
+  1218→        p = _write_jsonl(tmp_path, "dupes_hr.jsonl", [rec])
+  1219→
+  1220→        monkeypatch.setattr(sys, "argv", ["analyzer", str(p)])
+  1221→        main()
+  1222→
+  1223→        out = capsys.readouterr().out
+  1224→        assert "Duplicate Content" in out
+  1225→
+  1226→    def test_missing_file_exits(self, tmp_path, monkeypatch):
+  1227→        """Non-existent log file produces error and sys.exit(1)."""
+  1228→        fake = tmp_path / "does_not_exist.jsonl"
+  1229→        monkeypatch.setattr(sys, "argv", ["analyzer", str(fake)])
+  1230→
+  1231→        with pytest.raises(SystemExit) as exc_info:
+  1232→            main()
+  1233→        assert exc_info.value.code == 1
+  1234→
+  1235→    def test_print_analysis_no_crash(self, tmp_path, capsys):
+  1236→        """print_analysis runs without error on a real analysis."""
+  1237→        rec = _make_request(
+  1238→            system_prompt_full=_make_system_blocks(),
+  1239→            messages_full=[
+  1240→                _make_user_msg_with_reminders(
+  1241→                    SKILLS_REMINDER, BUDGET_REMINDER, CLAUDE_MD_REMINDER,
+  1242→                ),
+  1243→                {"role": "assistant", "content": [
+  1244→                    _tool_use("tu_1", "Read", {"file_path": "/f.py"}),
+  1245→                ]},
+  1246→                {"role": "user", "content": [
+  1247→                    _tool_result("tu_1", "data"),
+  1248→                ]},
+  1249→            ],
+  1250→        )
+  1251→        p = _write_jsonl(tmp_path, "pa.jsonl", [rec])
+  1252→        a = analyze_system_prompts(p)
+  1253→        print_analysis(a)
+  1254→        out = capsys.readouterr().out
+  1255→        assert "SYSTEM PROMPT WASTE ANALYSIS" in out
+  1256→
+  1257→    def test_print_analysis_empty_session(self, capsys):
+  1258→        """print_analysis on an empty SessionAnalysis doesn't crash."""
+  1259→        a = SessionAnalysis(proxy_log="empty.jsonl")
+  1260→        print_analysis(a)
+  1261→        out = capsys.readouterr().out
+  1262→        assert "SYSTEM PROMPT WASTE ANALYSIS" in out
+  1263→
+  1264→
+  1265→# ---------------------------------------------------------------------------
+  1266→# Edge cases
+  1267→# ---------------------------------------------------------------------------
+  1268→
+  1269→class TestEdgeCases:
+  1270→    def test_classify_reminder_memory_md(self):
+  1271→        assert _classify_reminder("# memoryMd\nSome memory content") == "memory_md"
+  1272→        assert _classify_reminder("Your MEMORY.md file says...") == "memory_md"
+  1273→
+  1274→    def test_classify_reminder_todo(self):
+  1275→        assert _classify_reminder(
+  1276→            "The TodoWrite tool hasn't been used yet"
+  1277→        ) == "todo_reminder"
+  1278→
+  1279→    def test_classify_reminder_unknown(self):
+  1280→        assert _classify_reminder("Something completely unrecognized") == "unknown_reminder"
+  1281→
+  1282→    def test_infer_tool_definition_bytes_no_gap(self):
+  1283→        """When total == system + messages, gap is 0 → returns 0."""
+  1284→        records = [
+  1285→            {
+  1286→                "type": "request",
+  1287→                "total_request_bytes": 100,
+  1288→                "system": {"system_prompt_bytes": 50},
+  1289→                "messages": {"messages_total_bytes": 50},
+  1290→            },
+  1291→        ]
+  1292→        assert _infer_tool_definition_bytes(records) == 0
+  1293→
+  1294→    def test_infer_tool_definition_bytes_negative_gap(self):
+  1295→        """Negative gap (shouldn't happen in practice) is filtered out."""
+  1296→        records = [
+  1297→            {
+  1298→                "type": "request",
+  1299→                "total_request_bytes": 10,
+  1300→                "system": {"system_prompt_bytes": 50},
+  1301→                "messages": {"messages_total_bytes": 50},
+  1302→            },
+  1303→        ]
+  1304→        # gap = 10 - 50 - 50 = -90, not > 0, so filtered → returns 0
+  1305→        assert _infer_tool_definition_bytes(records) == 0
+  1306→
+  1307→    def test_session_analysis_asdict(self):
+  1308→        """SessionAnalysis can be serialized via asdict without error."""
+  1309→        a = SessionAnalysis(
+  1310→            proxy_log="test.jsonl",
+  1311→            api_calls=5,
+  1312→            total_system_prompt_bytes=10000,
+  1313→        )
+  1314→        d = asdict(a)
+  1315→        assert d["proxy_log"] == "test.jsonl"
+  1316→        assert d["api_calls"] == 5
+  1317→        # Ensure JSON-serializable
+  1318→        json.dumps(d)
+  1319→
+  1320→    def test_split_into_sections_no_matches(self):
+  1321→        """Text with no recognized headings returns empty list."""
+  1322→        assert _split_into_sections("Just some random text.") == []
+  1323→
+  1324→    def test_split_into_sections_single_heading(self):
+  1325→        """Text with one recognized heading returns that section."""
+  1326→        text = "# System\nSome system content."
+  1327→        sections = _split_into_sections(text)
+  1328→        assert len(sections) == 1
+  1329→        assert sections[0][0] == "system_section"
+  1330→
+  1331→    def test_message_with_non_list_non_string_content(self):
+  1332→        """Messages with unexpected content types are safely skipped."""
+  1333→        messages = [
+  1334→            {"role": "user", "content": 12345},
+  1335→        ]
+  1336→        components = _extract_message_injections(messages)
+  1337→        assert components == []
+  1338→
+  1339→    def test_message_block_non_string_text(self):
+  1340→        """Content blocks where 'text' is not a string are skipped."""
+  1341→        messages = [
+  1342→            {"role": "user", "content": [
+  1343→                {"type": "text", "text": 42},
+  1344→            ]},
+  1345→        ]
+  1346→        components = _extract_message_injections(messages)
+  1347→        assert components == []
+  1348→

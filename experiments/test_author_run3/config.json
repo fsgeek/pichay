@@ -1,0 +1,13 @@
+{
+  "treatment": "test_author",
+  "run": 3,
+  "project_dir": "/home/tony/projects/pichay",
+  "branch": null,
+  "compact": false,
+  "age_threshold": 4,
+  "min_size": 500,
+  "temperature": 0.0,
+  "prompt": "You are a test author. Read src/pichay/trimmer.py and write comprehensive tests in tests/test_trimmer.py. You did NOT write the code you are testing.\n\nRead pager.py, proxy.py, analyzer.py, and eval.py to understand the data structures and patterns used by the existing test suites.\n\nThe trimmer module has two main parts:\n1. SystemPromptTrimmer class (live trimming) with methods: trim(), _trim_tools(), _dedupe_skills(), _track_static()\n2. Offline analysis: analyze_trimming(), SessionTrimReport, print_trim_report()\n\nTest areas to cover:\n\nTOOL TRIMMING:\n- First request with no usage: all tools should be stubbed\n- After a tool is used: that tool should have full definition restored, others still stubbed\n- Tool definitions are stored on first encounter (full_tool_defs)\n- Stub format: {name, first-line description truncated to 120 chars, empty input_schema}\n- bytes_before > bytes_after when stubs are applied\n- restored_tools count accuracy\n\nSKILL DEDUPLICATION:\n- Skills with multiple prefixes (pptx, example-skills:pptx, document-skills:pptx) \u2014 only first kept\n- Skills without duplicates are not modified\n- Works on both string content and list content blocks\n- _dedupe_skills_text returns correct (new_text, entries, dupes) tuple\n- Byte savings are accurate\n\nSTATIC COMPONENT TRACKING:\n- First turn: nothing is static (no previous hashes)\n- Second turn with same content: all components are static\n- Changed component: not counted as static\n- static_bytes_skippable is correct\n\nINTEGRATION:\n- TrimResult combines all three interventions\n- total_bytes_saved is tools + skills\n- total_bytes_skippable includes static\n- cumulative stats accumulate across trim() calls\n- summary() returns correct state\n- log_fn is called with correct record format\n\nOFFLINE ANALYSIS:\n- analyze_trimming on empty log\n- analyze_trimming on log with no messages_full (graceful skip)\n- SessionTrimReport properties (avg_skill_bytes_saved, avg_tool_bytes_saveable)\n- CLI entry point (print_trim_report, JSON output)\n\nEDGE CASES:\n- Empty tools list\n- No system-reminder blocks\n- No system prompt in body\n- Tool with very long description (truncation)\n- Tool with no description\n\nDo NOT modify any existing source files \u2014 only create tests/test_trimmer.py. Existing test files test_replay.py and test_analyzer.py show the test patterns used in this project.",
+  "started_at": "2026-03-02T07:59:57.755924+00:00",
+  "ended_at": "2026-03-02T08:03:33.674117+00:00"
+}
