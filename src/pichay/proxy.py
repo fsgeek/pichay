@@ -60,6 +60,7 @@ def create_app(
     age_threshold: int = 4,
     min_size: int = 500,
     upstream: str = DEFAULT_API_BASE,
+    token_cap: int = 0,
 ) -> Flask:
     """Create the proxy Flask app."""
     app = Flask(__name__)
@@ -68,6 +69,22 @@ def create_app(
     # One log file per proxy session
     session_start = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"proxy_{session_start}.jsonl"
+
+    # Token cap state (mutable dict for closure access)
+    _token_state = {"last_effective": 0, "blocked": False, "turn": 0}
+    _token_warning_threshold = int(token_cap * 0.8) if token_cap > 0 else 0
+
+    # ANSI colors for terminal output
+    _YELLOW = "\033[33m"
+    _RED = "\033[31m"
+    _RESET = "\033[0m"
+
+    if token_cap > 0:
+        print(
+            f"Token cap: {token_cap:,} "
+            f"(warning at {_token_warning_threshold:,})",
+            file=sys.stderr,
+        )
 
     # Pager state (lives for the proxy session)
     page_store = None
@@ -104,6 +121,50 @@ def create_app(
         """Append a record to the log file."""
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
+
+    def _check_token_cap(usage: dict) -> None:
+        """Check effective tokens against cap, update state, emit warnings."""
+        if token_cap <= 0:
+            return
+        effective = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
+        _token_state["last_effective"] = effective
+        pct = (effective / token_cap * 100) if token_cap > 0 else 0
+
+        if effective > token_cap:
+            _token_state["blocked"] = True
+            print(
+                f"{_RED}  TOKEN CAP EXCEEDED: {effective:,} / {token_cap:,} "
+                f"({pct:.0f}%) — next request will be blocked{_RESET}",
+                file=sys.stderr,
+            )
+            log_record({
+                "type": "token_cap",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "action": "exceeded",
+                "effective_tokens": effective,
+                "token_cap": token_cap,
+                "pct": round(pct, 1),
+                "turn": _token_state["turn"],
+            })
+        elif effective > _token_warning_threshold:
+            print(
+                f"{_YELLOW}  TOKEN WARNING: {effective:,} / {token_cap:,} "
+                f"({pct:.0f}%) — approaching cap{_RESET}",
+                file=sys.stderr,
+            )
+            log_record({
+                "type": "token_cap",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "action": "warning",
+                "effective_tokens": effective,
+                "token_cap": token_cap,
+                "pct": round(pct, 1),
+                "turn": _token_state["turn"],
+            })
 
     # Wire up trimmer logging now that log_record exists
     if trimmer is not None:
@@ -222,6 +283,41 @@ def create_app(
         request_record["messages_full"] = body.get("messages", [])
 
         log_record(request_record)
+
+        _token_state["turn"] += 1
+
+        # --- Token cap gate ---
+        if token_cap > 0 and _token_state["blocked"]:
+            last = _token_state["last_effective"]
+            msg = (
+                f"Token cap exceeded. Last effective context: "
+                f"{last:,} tokens (cap: {token_cap:,}). "
+                f"Session has been blocked to prevent billing. "
+                f"Restart with a fresh context or raise --token-cap."
+            )
+            print(
+                f"{_RED}  BLOCKED: {msg}{_RESET}",
+                file=sys.stderr,
+            )
+            log_record({
+                "type": "token_cap",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "action": "blocked",
+                "last_effective_tokens": last,
+                "token_cap": token_cap,
+                "turn": _token_state["turn"],
+            })
+            return Response(
+                json.dumps({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": msg,
+                    },
+                }),
+                status=429,
+                content_type="application/json",
+            )
 
         # --- System prompt trimming (if enabled) ---
         if trim and trimmer is not None:
@@ -381,6 +477,7 @@ def create_app(
                     "usage": usage,
                     "stop_reason": resp_body.get("stop_reason"),
                 })
+                _check_token_cap(usage)
             except Exception:
                 log_record({
                     "type": "response_error",
@@ -463,6 +560,7 @@ def create_app(
                         "response_bytes": len(full_response),
                         "usage": usage,
                     })
+                    _check_token_cap(usage)
 
             return Response(
                 generate(),
@@ -545,6 +643,12 @@ def main():
         help=f"Upstream API base URL (default: {DEFAULT_API_BASE}). "
              "Any Anthropic-compatible endpoint: OpenRouter, Kimi, etc.",
     )
+    parser.add_argument(
+        "--token-cap", type=int, default=0,
+        help="Hard cap on effective input tokens. Blocks requests after "
+             "exceeding this. Warning at 80%%. 0 = no cap (default: 0). "
+             "Set to 200000 for subscription billing threshold.",
+    )
     args = parser.parse_args()
 
     app = create_app(
@@ -554,6 +658,7 @@ def main():
         age_threshold=args.age_threshold,
         min_size=args.min_size,
         upstream=args.upstream,
+        token_cap=args.token_cap,
     )
     if args.temperature is not None:
         app.config["temperature_override"] = args.temperature
