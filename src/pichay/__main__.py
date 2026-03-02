@@ -160,6 +160,7 @@ def run_experiment(args: argparse.Namespace) -> None:
             claude_cmd,
             cwd=project_dir,
             env=env,
+            stdin=subprocess.DEVNULL,
         )
     except KeyboardInterrupt:
         print("\n  Interrupted by user.", file=sys.stderr)
