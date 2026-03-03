@@ -25,6 +25,7 @@ import argparse
 import json
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -165,6 +166,36 @@ def create_app(
                 "pct": round(pct, 1),
                 "turn": _token_state["turn"],
             })
+
+    def _display_turn_status(usage: dict) -> None:
+        """Post-response status line with real token count."""
+        effective = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
+        if effective == 0:
+            return
+
+        cap_str = ""
+        if token_cap > 0:
+            pct = effective / token_cap * 100
+            cap_str = f"/{token_cap // 1000}k ({pct:.0f}%)"
+
+        ev_str = ""
+        if page_store is not None:
+            ps = page_store
+            pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
+            ev_str = (
+                f" | ev {ps.unique_evictions} gc {ps.gc_count}{pin_str}"
+                f" | faults {len(ps.faults)}/{ps.unique_evictions}"
+            )
+
+        print(
+            f"  [Turn {_token_state['turn']}] "
+            f"{effective:,} tok{cap_str}{ev_str}",
+            file=sys.stderr,
+        )
 
     # Wire up trimmer logging now that log_record exists
     if trimmer is not None:
@@ -391,10 +422,14 @@ def create_app(
             faults = page_store.detect_faults(messages)
             if faults:
                 for fault in faults:
+                    ago = time.monotonic() - fault.original_eviction.evicted_at
+                    if ago < 60:
+                        age_str = f"{ago:.0f}s ago"
+                    else:
+                        age_str = f"{ago / 60:.1f}min ago"
                     print(
                         f"  PAGE FAULT: {fault.tool_name} "
-                        f"re-requested (evicted from turn "
-                        f"{fault.original_eviction.turn_index}, "
+                        f"re-requested (evicted {age_str}, "
                         f"{fault.original_eviction.original_size:,} bytes)",
                         file=sys.stderr,
                     )
@@ -411,13 +446,9 @@ def create_app(
                         for f in faults
                     ],
                     "cumulative_faults": len(page_store.faults),
-                    "cumulative_evictions": page_store.cumulative_evictions,
-                    "fault_rate": (
-                        len(page_store.faults)
-                        / page_store.cumulative_evictions
-                        if page_store.cumulative_evictions > 0
-                        else 0.0
-                    ),
+                    "unique_evictions": page_store.unique_evictions,
+                    "gc_count": page_store.gc_count,
+                    "fault_rate": page_store.fault_rate,
                 })
 
             # Compact
@@ -441,17 +472,12 @@ def create_app(
                     "skipped_small": stats.skipped_small,
                     "skipped_recent": stats.skipped_recent,
                     "skipped_error": stats.skipped_error,
-                    "cumulative_evictions": page_store.cumulative_evictions,
-                    "cumulative_bytes_saved": page_store.cumulative_bytes_saved,
+                    "unique_evictions": page_store.unique_evictions,
+                    "gc_count": page_store.gc_count,
+                    "eviction_bytes_saved": page_store.eviction_bytes_saved,
+                    "gc_bytes_saved": page_store.gc_bytes_saved,
                     "cumulative_faults": len(page_store.faults),
-                    "fault_rate": round(
-                        len(page_store.faults)
-                        / page_store.cumulative_evictions
-                        * 100,
-                        1,
-                    )
-                    if page_store.cumulative_evictions > 0
-                    else 0.0,
+                    "fault_rate": round(page_store.fault_rate * 100, 1),
                     "messages_bytes_before": message_metrics[
                         "messages_total_bytes"
                     ],
@@ -461,35 +487,29 @@ def create_app(
                 }
                 log_record(compaction_record)
 
-                # Dashboard status line
+                # Dashboard status line (pre-forward, bytes only)
                 before_kb = message_metrics["messages_total_bytes"] / 1024
                 after_kb = post_metrics["messages_total_bytes"] / 1024
-                # 4.15 bytes/token from corpus measurement
-                est_tokens = int(post_metrics["messages_total_bytes"] / 4.15)
-                cap_str = ""
-                if token_cap > 0:
-                    cap_pct = est_tokens / token_cap * 100
-                    cap_str = f" ({cap_pct:.0f}% of {token_cap // 1000}k cap)"
+                saved_pct = (
+                    (1 - after_kb / before_kb) * 100
+                    if before_kb > 0
+                    else 0
+                )
+                ps = page_store
+                pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
                 print(
-                    f"  [{before_kb:.0f}KB → {after_kb:.0f}KB] "
-                    f"~{est_tokens:,} tok{cap_str} | "
-                    f"evicted {stats.evicted_count}, "
-                    f"saved {stats.bytes_saved:,}B "
-                    f"({stats.reduction_pct:.0f}%), "
-                    f"faults {len(page_store.faults)}"
-                    f"/{page_store.cumulative_evictions}",
+                    f"  [{before_kb:.0f}KB → {after_kb:.0f}KB]"
+                    f" ({saved_pct:.0f}% saved) "
+                    f"ev {ps.unique_evictions} gc {ps.gc_count}"
+                    f"{pin_str} | "
+                    f"faults {len(ps.faults)}/{ps.unique_evictions}",
                     file=sys.stderr,
                 )
             else:
                 # No eviction this turn — still show working set size
                 ws_kb = message_metrics["messages_total_bytes"] / 1024
-                est_tokens = int(message_metrics["messages_total_bytes"] / 4.15)
-                cap_str = ""
-                if token_cap > 0:
-                    cap_pct = est_tokens / token_cap * 100
-                    cap_str = f" ({cap_pct:.0f}% of {token_cap // 1000}k cap)"
                 print(
-                    f"  [{ws_kb:.0f}KB] ~{est_tokens:,} tok{cap_str}",
+                    f"  [{ws_kb:.0f}KB]",
                     file=sys.stderr,
                 )
 
@@ -541,6 +561,7 @@ def create_app(
                     "stop_reason": resp_body.get("stop_reason"),
                 })
                 _check_token_cap(usage)
+                _display_turn_status(usage)
             except Exception:
                 log_record({
                     "type": "response_error",
@@ -624,6 +645,7 @@ def create_app(
                         "usage": usage,
                     })
                     _check_token_cap(usage)
+                    _display_turn_status(usage)
 
             return Response(
                 generate(),

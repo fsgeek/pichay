@@ -23,6 +23,7 @@ Metrics for success (from Tony):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -67,6 +68,7 @@ class CompactionStats:
     skipped_small: int = 0
     skipped_recent: int = 0
     skipped_error: int = 0
+    skipped_pinned: int = 0
 
     @property
     def bytes_saved(self) -> int:
@@ -82,34 +84,69 @@ class CompactionStats:
 class PageStore:
     """Stores evicted tool result content and detects page faults.
 
-    In-memory for now. The page file is for analysis, not production.
+    Distinguishes two operations the proxy performs:
 
-    A page fault is when the model re-issues a tool call for content
-    that was evicted. This is the key observability signal: it tells
-    us whether eviction was wrong (costly) or right (content was dead).
+    - **Eviction**: Removing Read results (stable content identity).
+      Tracked in the eviction index. Faults are possible.
+    - **Garbage collection**: Removing ephemeral tool output (Bash,
+      Grep, Glob, etc.). Always safe — re-running requests current
+      state, not the evicted content. No fault concept.
+
+    Re-eviction (same tool_use_id seen on a subsequent turn) is a
+    no-op for counting — Claude Code re-sends its full message history,
+    so the proxy re-stubs the same content every turn. That's the
+    mechanical operation, not a new eviction decision.
     """
 
     def __init__(self, log_path: Path | None = None):
         self.pages: dict[str, PageEntry] = {}
         self.log_path = log_path
-        self.cumulative_bytes_saved: int = 0
-        self.cumulative_evictions: int = 0
         self.faults: list[PageFault] = []
-        # Index for fault detection: (tool_name, key) → PageEntry
-        # Key is the identifying parameter (file_path for Read, etc.)
-        self._eviction_index: dict[tuple[str, str], PageEntry] = {}
+        # Eviction index: file_path → PageEntry (Read only)
+        self._eviction_index: dict[str, PageEntry] = {}
+
+        # Split counters — eviction vs garbage collection
+        self.unique_evictions: int = 0
+        self.eviction_bytes_saved: int = 0
+        self.gc_count: int = 0
+        self.gc_bytes_saved: int = 0
+
+        # Fault-driven pinning: one fault + same content = pin
+        self._pinned: dict[str, str] = {}  # file_path → content_hash
+        self._fault_content: dict[str, str] = {}  # file_path → content_hash at eviction
+        self.pin_count: int = 0
+
+        # Legacy aliases for compatibility
+        self.cumulative_evictions: int = 0
+        self.cumulative_bytes_saved: int = 0
 
     def store(self, entry: PageEntry) -> None:
+        is_new = entry.tool_use_id not in self.pages
         self.pages[entry.tool_use_id] = entry
-        self.cumulative_bytes_saved += entry.original_size - len(
+
+        if not is_new:
+            return  # Re-eviction — same content re-stubbed, don't count
+
+        bytes_saved = entry.original_size - len(
             entry.summary.encode("utf-8")
         )
-        self.cumulative_evictions += 1
-
-        # Index for fault detection
         key = _eviction_key(entry.tool_name, entry.tool_input)
+
         if key is not None:
-            self._eviction_index[(entry.tool_name, key)] = entry
+            # Read result — real eviction, track in index
+            self._eviction_index[key] = entry
+            self.unique_evictions += 1
+            self.eviction_bytes_saved += bytes_saved
+        else:
+            # Ephemeral tool — garbage collection
+            self.gc_count += 1
+            self.gc_bytes_saved += bytes_saved
+
+        # Update legacy counters
+        self.cumulative_evictions = self.unique_evictions + self.gc_count
+        self.cumulative_bytes_saved = (
+            self.eviction_bytes_saved + self.gc_bytes_saved
+        )
 
         if self.log_path is not None:
             record = {
@@ -117,6 +154,7 @@ class PageStore:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "tool_use_id": entry.tool_use_id,
                 "tool_name": entry.tool_name,
+                "tool_category": "eviction" if key else "gc",
                 "original_size": entry.original_size,
                 "summary_size": len(entry.summary.encode("utf-8")),
                 "turn_index": entry.turn_index,
@@ -158,7 +196,7 @@ class PageStore:
                 if key is None:
                     continue
 
-                evicted = self._eviction_index.get((tool_name, key))
+                evicted = self._eviction_index.get(key)
                 if evicted is None:
                     continue
 
@@ -177,6 +215,11 @@ class PageStore:
                 new_faults.append(fault)
                 self.faults.append(fault)
 
+                # Record evicted content hash for pin comparison
+                self._fault_content[key] = _content_hash(
+                    evicted.original_content
+                )
+
                 if self.log_path is not None:
                     record = {
                         "type": "page_fault",
@@ -192,21 +235,66 @@ class PageStore:
 
         return new_faults
 
+    def is_pinned(self, key: str) -> bool:
+        return key in self._pinned
+
+    def pin(self, key: str, content_hash: str) -> None:
+        self._pinned[key] = content_hash
+        self._fault_content.pop(key, None)
+        self.pin_count += 1
+
+        if self.log_path is not None:
+            record = {
+                "type": "pin",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "file_path": key,
+                "content_hash": content_hash,
+            }
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
+    def unpin(self, key: str) -> None:
+        old_hash = self._pinned.pop(key, None)
+        self._fault_content.pop(key, None)
+
+        if self.log_path is not None and old_hash is not None:
+            record = {
+                "type": "unpin",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "file_path": key,
+                "reason": "content_changed",
+            }
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
     def retrieve(self, tool_use_id: str) -> PageEntry | None:
         return self.pages.get(tool_use_id)
+
+    @property
+    def fault_rate(self) -> float:
+        """Fault rate over unique Read evictions (the meaningful denominator)."""
+        if self.unique_evictions == 0:
+            return 0.0
+        return len(self.faults) / self.unique_evictions
+
+    @property
+    def total_bytes_saved(self) -> int:
+        return self.eviction_bytes_saved + self.gc_bytes_saved
 
     def summary(self) -> dict:
         """Current state for the health endpoint."""
         return {
-            "total_evictions": self.cumulative_evictions,
-            "total_bytes_saved": self.cumulative_bytes_saved,
+            "unique_evictions": self.unique_evictions,
+            "gc_count": self.gc_count,
+            "total_bytes_saved": self.total_bytes_saved,
+            "eviction_bytes_saved": self.eviction_bytes_saved,
+            "gc_bytes_saved": self.gc_bytes_saved,
             "total_page_faults": len(self.faults),
-            "fault_rate": (
-                len(self.faults) / self.cumulative_evictions
-                if self.cumulative_evictions > 0
-                else 0.0
-            ),
+            "fault_rate": self.fault_rate,
             "pages_in_store": len(self.pages),
+            "pinned_count": len(self._pinned),
+            "pinned_paths": list(self._pinned.keys()),
+            "total_pins": self.pin_count,
             "faults_by_tool": _count_by(
                 self.faults, lambda f: f.tool_name
             ),
@@ -227,24 +315,16 @@ def _count_by(items: list, key_fn) -> dict[str, int]:
 def _eviction_key(tool_name: str, tool_input: dict) -> str | None:
     """Extract the identifying key for a tool call, for fault matching.
 
-    Returns None for tools where re-invocation isn't meaningful
-    (e.g., Agent results can't be re-requested by input match).
+    Only Read produces a fault-trackable key. Read results have stable
+    content identity (file path) — re-requesting after eviction means
+    the model needed what was taken.
+
+    Bash, Grep, Glob, WebFetch, WebSearch are ephemeral — re-running
+    them requests current state, not the evicted content. Removing
+    their output is garbage collection, not eviction. No fault possible.
     """
     if tool_name == "Read":
         return tool_input.get("file_path")
-    elif tool_name == "Grep":
-        # pattern + path is the identity
-        pattern = tool_input.get("pattern", "")
-        path = tool_input.get("path", ".")
-        return f"{pattern}@{path}"
-    elif tool_name == "Glob":
-        return tool_input.get("pattern")
-    elif tool_name == "Bash":
-        return tool_input.get("command")
-    elif tool_name == "WebFetch":
-        return tool_input.get("url")
-    elif tool_name == "WebSearch":
-        return tool_input.get("query")
     return None
 
 
@@ -255,6 +335,17 @@ def _content_size(content: str | list | None) -> int:
     if isinstance(content, str):
         return len(content.encode("utf-8"))
     return len(json.dumps(content).encode("utf-8"))
+
+
+def _content_hash(content: str | list | None) -> str:
+    """Stable hash of tool result content for pin comparison."""
+    if content is None:
+        raw = b""
+    elif isinstance(content, str):
+        raw = content.encode("utf-8")
+    else:
+        raw = json.dumps(content, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _build_tool_use_index(messages: list[dict]) -> dict[str, dict]:
@@ -387,6 +478,10 @@ def compact_messages(
 
     total_user_turns = len(user_turn_indices)
 
+    # Phase 0: Check for fresh reads that should unpin stale pins
+    if page_store is not None and page_store._pinned:
+        _check_pin_freshness(messages, tool_use_index, page_store)
+
     # Walk through messages and compact old tool results
     current_user_turn = 0
     for msg_idx, msg in enumerate(messages):
@@ -429,12 +524,32 @@ def compact_messages(
                 stats.bytes_after += original_size
                 continue
 
-            # This result gets evicted
+            # Resolve tool identity
             tool_use_id = block.get("tool_use_id", "")
             tool_info = tool_use_index.get(tool_use_id, {})
             tool_name = tool_info.get("name", "unknown")
             tool_input = tool_info.get("input", {})
+            key = _eviction_key(tool_name, tool_input)
 
+            # Skip pinned content — fault history proved it's in the working set
+            if key is not None and page_store is not None:
+                if page_store.is_pinned(key):
+                    stats.skipped_pinned += 1
+                    stats.bytes_before += original_size
+                    stats.bytes_after += original_size
+                    continue
+
+                # Check if this should be pinned: faulted + same content
+                if key in page_store._fault_content:
+                    ch = _content_hash(original_content)
+                    if page_store._fault_content[key] == ch:
+                        page_store.pin(key, ch)
+                        stats.skipped_pinned += 1
+                        stats.bytes_before += original_size
+                        stats.bytes_after += original_size
+                        continue
+
+            # This result gets evicted
             summary = _make_summary(
                 tool_name, tool_input, original_size, original_content
             )
@@ -462,3 +577,50 @@ def compact_messages(
             stats.bytes_after += len(summary.encode("utf-8"))
 
     return stats
+
+
+def _check_pin_freshness(
+    messages: list[dict],
+    tool_use_index: dict[str, dict],
+    page_store: PageStore,
+) -> None:
+    """Detect fresh reads of pinned paths — unpin if content changed.
+
+    When a file is pinned but the model reads it again (edit/review cycle),
+    the new read replaces the old pin. If the content changed, unpin —
+    the old version is stale. The new version starts a fresh fault cycle.
+    """
+    # Find the latest non-evicted content hash for each pinned path
+    latest: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id", "")
+            tool_info = tool_use_index.get(tool_use_id, {})
+            tool_name = tool_info.get("name", "unknown")
+            if tool_name != "Read":
+                continue
+            tool_input = tool_info.get("input", {})
+            key = _eviction_key(tool_name, tool_input)
+            if key is None or key not in page_store._pinned:
+                continue
+            block_content = block.get("content", "")
+            # Skip already-evicted summaries
+            if isinstance(block_content, str) and block_content.startswith(
+                "[Paged out:"
+            ):
+                continue
+            latest[key] = _content_hash(block_content)
+
+    # Unpin if the latest read has different content
+    for key, ch in latest.items():
+        if ch != page_store._pinned[key]:
+            page_store.unpin(key)
