@@ -38,6 +38,7 @@ from pathlib import Path
 import httpx
 from flask import Flask, Response, request
 
+from pichay.blocks import BlockStore
 from pichay.pager import PageStore, compact_messages, compact_conversation
 from pichay.phantom import (
     PhantomCall,
@@ -137,6 +138,7 @@ def create_app(
                     "calibrated": False,
                 },
                 "page_store": ps,
+                "block_store": BlockStore() if compact else None,
                 "phantom_pending": [],
                 "observe_only": False,
             }
@@ -179,7 +181,7 @@ def create_app(
     _PICHAY_STATUS_MARKER = "[pichay-system-status]"
 
     def _inject_system_status(body: dict, ts: dict, cap: int,
-                              request_time) -> None:
+                              request_time, block_store=None) -> None:
         """Inject or replace a system status block with context pressure info.
 
         Gives the model awareness of:
@@ -216,6 +218,23 @@ def create_app(
             f"({pct:.0f}%) | pressure: {pressure}\n"
             f"Hard cap: {hard_cap:,} tokens (85% of context window)"
         )
+
+        # At moderate+ pressure, show block inventory to prompt management
+        if pressure in ("moderate", "high") and block_store is not None:
+            large = block_store.large_blocks(min_size=2000)
+            if large:
+                block_lines = []
+                for b in large[:5]:  # Top 5 largest
+                    size_k = b.size / 1024
+                    block_lines.append(
+                        f"  - [block:{b.block_id}] {b.role} turn {b.turn} "
+                        f"({size_k:.1f}KB): {b.preview}"
+                    )
+                status_text += (
+                    f"\n\nLargest conversation blocks "
+                    f"({block_store.block_count} tracked):\n"
+                    + "\n".join(block_lines)
+                )
 
         system = body.get("system", "")
         if isinstance(system, list):
@@ -563,7 +582,14 @@ def create_app(
         # Give the model context pressure awareness and system identification.
         # Replaced each turn (not appended) so the model sees current state.
         if compact:
-            _inject_system_status(body, ts, token_cap, request_time)
+            _inject_system_status(body, ts, token_cap, request_time,
+                                  block_store=session["block_store"])
+
+        # --- Block labeling (conversation memory management) ---
+        bs = session["block_store"]
+        if compact and bs is not None:
+            messages = body.get("messages", [])
+            bs.label_messages(messages, ts["turn"])
 
         # --- Phantom tool handling (if compact mode) ---
         observe_only = session["observe_only"]
@@ -846,7 +872,8 @@ def create_app(
                     # modifying the conversation history.
                     if phantom_calls:
                         for pc in phantom_calls:
-                            _handle_phantom_call(pc, ps)
+                            _handle_phantom_call(pc, ps,
+                                                block_store=session.get("block_store"))
                             print(
                                 f"  [{sid}] PHANTOM{'(observe)' if observe_only else ''}: "
                                 f"{pc.name}({pc.input})",
@@ -929,10 +956,12 @@ def create_app(
             "active_sessions": len(_sessions),
         }
         if compact:
-            result["sessions"] = {
-                sid: s["page_store"].summary() if s["page_store"] else {}
-                for sid, s in _sessions.items()
-            }
+            result["sessions"] = {}
+            for sid, s in _sessions.items():
+                sess_info = s["page_store"].summary() if s["page_store"] else {}
+                if s.get("block_store"):
+                    sess_info["blocks"] = s["block_store"].summary()
+                result["sessions"][sid] = sess_info
         if trim and trimmer is not None:
             result["trimmer"] = trimmer.summary()
         return result

@@ -182,7 +182,8 @@ def inject_phantom_results(
     return messages
 
 
-def _handle_phantom_call(call: PhantomCall, page_store) -> str:
+def _handle_phantom_call(call: PhantomCall, page_store,
+                         block_store=None) -> str:
     """Execute a phantom tool call and return the result text."""
     if call.name == "memory_release":
         paths = call.input.get("paths", [])
@@ -202,6 +203,16 @@ def _handle_phantom_call(call: PhantomCall, page_store) -> str:
                 if entry is None:
                     # Try tool_use_id (Bash, Agent, Grep, etc.)
                     entry = page_store.pages.get(identifier)
+                if entry is None and block_store is not None:
+                    # Try block ID (conversation blocks)
+                    content = block_store.restore(identifier)
+                    if content is not None:
+                        restored.append({
+                            "label": f"block {identifier}",
+                            "content": content,
+                            "size": len(content),
+                        })
+                        continue
                 if entry is not None:
                     label = identifier
                     if entry.tool_name and entry.tool_name != "Read":
