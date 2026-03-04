@@ -244,8 +244,6 @@ def create_app(
 
     def _check_token_cap(usage: dict, session: dict) -> None:
         """Check effective tokens against cap, update state, emit warnings."""
-        if token_cap <= 0:
-            return
         ts = session["token_state"]
         sid = session["id"]
         effective = (
@@ -253,7 +251,10 @@ def create_app(
             + usage.get("cache_creation_input_tokens", 0)
             + usage.get("cache_read_input_tokens", 0)
         )
+        # Always track usage (needed for system status injection)
         ts["last_effective"] = effective
+        if token_cap <= 0:
+            return
         pct = (effective / token_cap * 100) if token_cap > 0 else 0
 
         if effective > token_cap:
