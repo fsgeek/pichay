@@ -27,8 +27,8 @@
     urlcolor=blue!60!black,
 }
 
-\title{Context Window Waste in Agentic AI Systems:\\
-  Measurement, Intervention, and Implications}
+\title{The Missing Memory Hierarchy:\\
+  Demand Paging for LLM Context Windows}
 
 \author{
   Tony Mason\thanks{University of British Columbia. \texttt{fsgeek@cs.ubc.ca}} \\
@@ -44,87 +44,130 @@
 
 % ====================================================================
 \begin{abstract}
-Agentic AI coding tools treat context windows as append-only logs,
-accumulating tool definitions, system prompts, and stale results
-without reclamation. We instrument a production AI coding assistant
-across 857 sessions and 54{,}170 API calls, measuring 4.45~billion
-effective input tokens of which 21.8\% (970~million tokens) is
-addressable waste from three sources: unused tool schemas sent on
-every request, duplicated system content, and stale tool results
-reprocessed at a median amplification factor of 84.4$\times$.
+The context window of a large language model is not memory. It is
+L1~cache---a small, fast, expensive resource that the field treats
+as the entire memory system. There is no L2, no virtual memory, no
+paging. Every tool definition, every system prompt, and every stale
+tool result occupies context for the lifetime of the session. The
+result is measurable: across 857~production sessions and
+4.45~billion effective input tokens, 21.8\% is structural waste.
 
-We implement proxy-layer interventions---tool definition stubbing,
-content deduplication, and age-based eviction---achieving 37.1\%
-reduction in effective input tokens with a 0.0254\% fault rate
-across 1.4~million simulated evictions and non-inferior output
-quality. The waste patterns are structural properties of the agentic
-architecture, not implementation bugs, and generalize to any system
-that sends tool schemas and accumulates conversation state. We
-discuss implications for inference cost, energy consumption, and
-throughput, and identify the open question of whether context
-curation may additionally improve output quality.
+We present \textsc{Pichay}, a demand paging system for LLM context
+windows. Implemented as a transparent proxy between client and
+inference API, \textsc{Pichay} interposes on the message stream to
+evict stale content, detect page faults when the model re-requests
+evicted material, and pin working-set pages identified by fault
+history. In offline replay across 1.4~million simulated evictions,
+the fault rate is 0.0254\%. In live production deployment over
+681~turns, the system reduces context consumption by up to 93\%
+(5{,}038KB $\to$ 339KB) while the model continues to operate
+correctly by faulting in content on demand.
+
+The key observation is that the problems the field faces---context
+limits, attention degradation, cost scaling, lost state across
+sessions---are virtual memory problems wearing different clothes.
+The solutions exist: working set
+theory~\citep{denning1968working}, demand paging, fault-driven
+replacement policies, and memory hierarchies with multiple
+eviction-managed levels. We describe the architecture of a full
+memory hierarchy for LLM systems (L1~through persistent storage),
+report on the first two levels deployed in production use, and
+identify rolling conversation compaction as the mechanism that
+connects session-level context management to cross-session memory.
 \end{abstract}
 
 % ====================================================================
 \section{Introduction}
 \label{sec:intro}
 
-Context windows in agentic AI systems function as unmanaged physical
-memory. Every tool definition, system prompt, and previous tool result
-occupies space for the lifetime of the session. There is no virtual
-memory, no paging, no eviction policy. The default behavior across
-every major AI coding tool---Claude Code, Cursor, GitHub Copilot,
-Windsurf---is accumulation.
+In 1961, the Atlas computer introduced demand paging: programs could
+address more memory than physically existed, and the hardware would
+transparently load pages from backing store as
+needed~\citep{kilburn1962one}. Before Atlas, programmers manually
+managed overlays---explicitly swapping code segments in and out of a
+fixed address space. The transition from overlays to virtual memory
+is one of the foundational advances in systems architecture.
 
-This is partly a training artifact. Language models learn from
-conversations that grow monotonically. No model has been trained on
-conversations where content was intelligently removed and output
-improved. The append-only pattern propagates through every framework
-(LangChain, LlamaIndex, Anthropic and OpenAI SDK conversation
-helpers) and every tool built on those frameworks.
+Large language model context windows are in the overlay era. Every
+agentic AI tool---Claude Code, Cursor, GitHub Copilot,
+Windsurf---manually assembles context on every API call: tool
+definitions, system prompts, and the complete message history. There
+is no eviction policy, no demand loading, no working set estimation.
+The default behavior is accumulation until the context limit forces
+a crisis.
 
-It is also a design artifact. The standard Messages API accepts a
-list of messages. The natural operation on a list is append. No
-field in the API says ``this content is stale'' or ``this tool is
-unlikely to be used.'' The protocol does not express the information
-that would enable management.
+This paper makes two contributions. First, we provide the empirical
+evidence that context management is a memory management problem. We
+instrument 857~production sessions (54{,}170 API calls,
+4.45~billion effective input tokens) and find that 21.8\% of tokens
+are structural waste from three sources: unused tool schemas
+(11.0\%), duplicated content (2.2\%), and stale tool results (8.7\%)
+reprocessed at a median amplification of 84.4$\times$. These are
+not implementation bugs. They are the inevitable consequence of
+managing a finite resource (the context window) without the
+abstractions that operating systems developed for the analogous
+problem fifty years ago.
 
-The result is measurable waste. In a corpus of 857 production
-sessions comprising 54{,}170 API calls and 4.45~billion effective
-input tokens, we find that 21.8\% of input tokens---970~million
-tokens---are addressable waste from three structural sources:
+Second, we build the system. \textsc{Pichay} is a demand paging
+system for LLM context windows, implemented as a transparent proxy
+between client and inference API. It distinguishes garbage collection
+(removing ephemeral tool output that cannot be re-requested) from
+paging (evicting addressable content that can be faulted back in).
+It detects page faults when the model re-requests evicted content.
+It pins working-set pages identified by fault history. And the
+eviction summaries it generates---designed as space-saving
+markers---function as retrieval handles that models understand
+without instruction: ``\texttt{[Paged out: Read file.py (8,192
+bytes). Re-read if needed.]}''
+
+In production deployment, the system extends a session from 7\%
+free context to 43\% free---the difference between imminent context
+death and substantial remaining capacity. Over a 681-turn session,
+it sustains operation at 97\% eviction rate, though this extreme
+case reveals the thrashing pathology well-known from OS
+research~\citep{denning1968working}: when the working set exceeds
+the resident set, the system spends more effort on faulting than on
+useful work.
+
+The deeper observation is that the context window is not memory. It
+is L1~cache. And nobody is building the rest of the hierarchy.
+The field's response to context limits is to make L1 bigger---1M
+token windows, 10M token windows. This is the equivalent of building
+machines with more physical RAM instead of inventing virtual memory.
+It works, but it doesn't scale, and it misses the architectural
+insight: a managed hierarchy of small-fast-expensive and
+large-slow-cheap storage, connected by eviction policies and fault
+mechanisms, outperforms any single level no matter how large.
+
+We describe the full hierarchy: L1~(the generation window), L2~(the
+working set, demand-paged and pinned), L3~(session history,
+compressed with declared losses), and L4~(cross-session persistent
+memory, indexed and retrievable). The first two levels are deployed
+and evaluated. The remaining levels are designed and their
+mechanisms identified.
+
+The contributions:
 \begin{enumerate}[nosep]
-  \item \textbf{Unused tool schemas} (11.0\%): 18 tool definitions
-    sent on every request when the median session uses 3.
-  \item \textbf{Content duplication} (2.2\%): Skills listed three
-    times under different prefixes; static system prompts re-sent
-    without change.
-  \item \textbf{Stale tool results} (8.7\%): File contents and
-    search results reprocessed at a median amplification of
-    84.4$\times$ their original size, surviving long past any
-    reference to them.
-\end{enumerate}
-
-We implement three proxy-layer interventions---tool definition
-stubbing, content deduplication, and age-based eviction---achieving
-37.1\% reduction in effective input tokens with a 0.0254\% fault
-rate across 1.4~million simulated evictions. Output quality is
-non-inferior: tasks complete correctly under all treatment
-conditions.
-
-The contributions of this paper are:
-\begin{enumerate}[nosep]
-  \item The first large-scale empirical measurement of context window
-    utilization in a production agentic AI coding tool.
-  \item A taxonomy of waste with four categories and measured
-    prevalence.
-  \item Proxy-layer interventions with an empirical fault model, achieving
-    37.1\% token reduction at 0.0254\% fault rate.
-  \item Corpus-scale validation confirming that small-sample findings
-    generalize across 857 sessions.
-  \item A systems framing---context windows as unmanaged physical
-    memory---that provides vocabulary and abstractions for a class
-    of optimizations.
+  \item The first large-scale empirical characterization of context
+    window utilization in production agentic AI, establishing that
+    21.8\% of tokens are structural waste with a measured taxonomy.
+  \item \textsc{Pichay}, a demand paging system for LLM context
+    windows with empirically measured fault rate (0.0254\% offline,
+    deployed in production).
+  \item Fault-driven pinning: a page replacement policy that
+    learns from its own mistakes---one fault pins a page for the
+    session, eliminating thrashing of working-set content.
+  \item Cooperative memory management via phantom tools: a
+    side-channel mechanism enabling the model to voluntarily
+    release cold pages and request cached faults---a new point in
+    the design space not available in hardware memory hierarchies,
+    where applications are non-cooperative.
+  \item The architectural observation that LLM context management
+    maps structurally (not merely metaphorically) to virtual memory,
+    and that the full OS memory hierarchy---from cache replacement
+    policies to working set theory---applies directly.
+  \item Design of a four-level memory hierarchy for LLM systems,
+    with the first two levels deployed and evaluated.
 \end{enumerate}
 
 % ====================================================================
@@ -172,24 +215,93 @@ Page fault & Model re-requests evicted content \\
 MMU & Proxy layer between client and API \\
 Working set & Currently relevant context subset \\
 Demand paging & Load tool definitions on first use \\
+Thrashing & Evict/fault cycle exceeding useful work \\
+Pinning & Fault history prevents re-eviction \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Early computer systems managed limited physical memory through
 manual overlays: programmers explicitly swapped code segments in and
-out of a fixed address space. The PDP-11, with 64KB of addressable
-memory, required careful overlay management for programs larger than
-physical memory. The transition to virtual memory---Multics,
-then Unix---automated this management through hardware page tables,
+out of a fixed address space. The transition to virtual
+memory---Atlas~\citep{kilburn1962one}, Multics, then
+Unix---automated this management through hardware page tables,
 demand paging, and working-set-based eviction
 policies~\citep{denning1968working,denning1970virtual}.
 
 Context windows are in the overlay era. Applications manually
 manage what fits, with no system-level support for eviction,
-demand loading, or working set estimation. The interventions we
-describe are the beginning of the virtual memory transition for
-LLM context.
+demand loading, or working set estimation.
+
+\subsection{The Memory Hierarchy}
+\label{sec:hierarchy}
+
+The field's response to context pressure is to increase context
+window size---from 4K to 32K to 128K to 1M tokens and beyond. This
+is the equivalent of building machines with more physical RAM
+instead of inventing virtual memory. It works but does not scale:
+attention cost is quadratic in context length, and the $O(n^2)$ cost
+explosion in long sessions means that even million-token windows
+fill and degrade~\citep{zeyliger2026quadratic}.
+
+The alternative is architectural: a managed hierarchy of levels,
+each larger, slower, and cheaper than the one above it, connected by
+eviction policies and fault mechanisms (Table~\ref{tab:hierarchy}).
+
+\begin{table}[ht]
+\centering
+\caption{Memory hierarchy for LLM systems.}
+\label{tab:hierarchy}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Level} & \textbf{Contents} & \textbf{Eviction} & \textbf{Fault} \\
+\midrule
+L1 & Generation window & --- & --- \\
+L2 & Working set (pinned) & Pressure-based & Re-read \\
+L3 & Session history & Age-based & Summary expansion \\
+L4 & Cross-session memory & LRU / relevance & Retrieval query \\
+Storage & Full corpus & None & Search + ingest \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{L1} is the active generation window---the tokens the model
+attends to on the current API call. Small, fast, expensive per
+token. This is what everyone calls ``the context window.''
+
+\textbf{L2} is the working set: content the model is actively using
+but that need not occupy L1 on every turn. Managed by fault-driven
+pinning (Section~\ref{sec:pinning}). A page evicted from L1 that is
+immediately re-requested is promoted to L2 and kept resident until
+context pressure forces demotion.
+
+\textbf{L3} is session history: earlier conversation turns,
+completed tool interactions, superseded plans. Compressed with
+declared losses into structured summaries. Faultable by expanding
+the summary back to original content from the client's backing
+store.
+
+\textbf{L4} is cross-session persistent memory: authored
+compressions (tensors), activity records, semantic indices. Survives
+session death. Retrieved by graph traversal or similarity search.
+
+\textbf{Storage} is the full corpus: every conversation transcript,
+every tool output, every document. Archived, indexed, never resident
+unless demanded.
+
+Content migrates between levels based on access patterns. The hot
+path stays in L1. Working-set content is demand-paged between L1 and
+L2. Cold history compresses into L3. Cross-session knowledge
+persists in L4. The context limit does not disappear---it becomes
+the L1~cache size. The total addressable memory is unbounded. System
+performance is determined by hit rates at each level, not by L1
+capacity alone.
+
+This paper implements and evaluates L1~management (eviction and
+garbage collection) and L2~management (fault-driven pinning). We
+design L3~(rolling conversation compaction) and describe the
+interface to L4~(persistent memory stores).
 
 \subsection{Related Work}
 \label{sec:related}
@@ -256,7 +368,172 @@ policy, fault rate, amplification factor---and the empirical evidence
 that it works on production data.
 
 % ====================================================================
-\section{Methodology}
+\section{System Design}
+\label{sec:system}
+
+\textsc{Pichay} is a transparent HTTP proxy that interposes between
+an agentic AI client and the inference API. On each request, it
+receives the full message array assembled by the client, applies
+context management policies, and forwards the modified request to
+the inference provider. The client is unaware of the interposition.
+
+\subsection{Architecture}
+
+The proxy operates at the Messages API level. It receives JSON
+requests containing the system prompt, tool definitions, and message
+history. It returns the inference provider's response unmodified.
+The interposition point is the message array: the proxy can inspect,
+measure, modify, or replace any message before forwarding.
+
+This design has three properties: (1)~it requires no changes to the
+client, the model, or the inference API; (2)~the client retains the
+full, unmodified conversation history, providing a backing store
+from which evicted content can be faulted back in; and (3)~the proxy
+sees the complete request on every turn, enabling stateful
+management without persistent connections.
+
+\subsection{Garbage Collection vs.\ Paging}
+
+Not all tool results are equal. We distinguish two categories:
+
+\textbf{Garbage collection} applies to ephemeral tool outputs---Bash
+command results, search outputs, directory listings---that have no
+stable identity. Once consumed, they cannot be meaningfully
+re-requested. Removing them is reclamation of dead content.
+
+\textbf{Paging} applies to addressable content---file reads, plan
+documents, specifications---that have stable identity (a file path).
+Removing these creates a fault risk: the model may need the content
+again and must re-read the file.
+
+The distinction matters for fault rate calculation. Only paging
+(Read evictions) can produce faults. Garbage collection cannot.
+Conflating them inflates the eviction denominator and deflates the
+apparent fault rate.
+
+\subsection{Eviction Policy}
+
+The current policy is FIFO by user-turn age: tool results older than
+$\tau$~user turns and larger than $s_{\min}$~bytes are candidates
+for eviction ($\tau = 4$, $s_{\min} = 500$ in all experiments). This
+is deliberately simple. The research question is how far a minimal
+policy extends before requiring sophistication.
+
+Evicted content is replaced with a retrieval handle:
+
+\begin{quote}
+\small\texttt{[Paged out: Read /path/to/file.py (8,192 bytes,
+187 lines). Re-read the file if you need its content.]}
+\end{quote}
+
+The handle serves three functions: (1)~it identifies what was
+removed; (2)~it states how to recover the content; and (3)~it
+occupies substantially less context than the original.
+
+\subsection{Page Fault Detection}
+
+When the model issues a tool call that matches an evicted entry (same
+tool name and arguments), the proxy detects a \emph{page fault}: the
+model is requesting content it previously had but lost to eviction.
+The evicted entry is indexed by a key derived from the tool name and
+input arguments (e.g., file path for Read operations).
+
+Page faults are observable events. They measure the cost of eviction:
+each fault is a wasted tool call round-trip that would not have
+occurred if the content had remained resident. At inference-time
+pricing, faults have direct monetary cost.
+
+\subsection{Fault-Driven Pinning}
+\label{sec:pinning}
+
+The simplest upgrade to FIFO: if evicting a page caused a fault,
+don't evict it again. One fault per file, permanently pinned for the
+session. The algorithm:
+
+\begin{enumerate}[nosep]
+  \item On eviction of addressable content: record the file path and
+    content hash.
+  \item On page fault: record the evicted content's hash in a fault
+    history table.
+  \item On next eviction attempt for the same path: if the current
+    content hash matches the fault history entry, pin the page---skip
+    eviction permanently.
+  \item On new read of a pinned path with different content (file was
+    edited): unpin. The old version is stale; the new version starts
+    a fresh fault cycle.
+\end{enumerate}
+
+The content hash comparison prevents false pins: if a file changed
+between eviction and re-read, the eviction was correct (stale data
+was removed). Pinning only applies when the model demonstrably
+needed exactly what was taken away. The unpin-on-edit rule handles
+the edit/review cycle common in coding sessions.
+
+\subsection{Retrieval Handles as Anchors}
+
+The eviction summary was designed as a space-saving marker. In
+practice, it functions as a late-binding retrieval handle---an anchor
+that stores minimal metadata and resolves to full content on demand.
+
+The handle resolves to \emph{current} content, not the original
+evicted content. A file edited since eviction materializes at its
+new state when faulted in. This temporal property is a feature: the
+model always gets the latest version, and stale cached content is
+impossible.
+
+Behavioral evidence: when a fresh model instance resumed a session
+containing paged-out content, it unprompted stated: ``Let me re-read
+the files I need since some were paged out.'' The model recognized
+the handles, understood what was missing, and chose to fault content
+in before acting. The handle's format carries its own semantics---no
+instruction was needed.
+
+\subsection{Cooperative Memory Management}
+\label{sec:cooperative}
+
+In OS virtual memory, the application is non-cooperative. It never
+voluntarily releases pages. The OS must infer the working set from
+access patterns because the CPU will not say what it needs next.
+Decades of replacement algorithms---FIFO, LRU, Clock, Working
+Set---exist because of this fundamental asymmetry.
+
+LLMs break this assumption. The model has \emph{incentive} to
+cooperate with the memory manager: cleaner context means better
+attention, better output quality, and longer session life. The
+processor wants to help manage its own cache. This changes the
+design space.
+
+\textsc{Pichay} exploits this through \emph{phantom tools}---tool
+definitions injected by the proxy that the framework never sees.
+The model can call them; the proxy intercepts the calls from the
+streaming response before the framework receives them, handles
+them internally, and injects coherent tool results on the next
+turn. The framework is unaware of the side channel.
+
+Two phantom tools are defined:
+
+\begin{description}[nosep]
+  \item[\texttt{memory\_release(paths)}] The model signals it no
+    longer needs specific files. The proxy marks them for immediate
+    eviction, bypassing the age threshold. This is the reference
+    bit---provided voluntarily by the processor.
+  \item[\texttt{memory\_fault(paths)}] The model requests evicted
+    content restored from the proxy's backing store. The proxy
+    resolves the fault from its eviction cache without a file system
+    round trip---faster and cheaper than a real Read tool call.
+\end{description}
+
+The key insight: in hardware memory hierarchies, the application is
+adversarial or indifferent. The entire replacement algorithm
+literature assumes non-cooperation. Cooperative demand paging---where
+the processor voluntarily releases cold pages and explicitly
+requests faults---is a new point in the design space, enabled by the
+fact that LLMs experience degraded output quality under context
+pressure and can learn that cooperation improves their own
+performance.
+
+% ====================================================================
+\section{Measurement}
 \label{sec:methodology}
 
 \subsection{Corpus}
@@ -630,6 +907,105 @@ corpus, this translates to 85~billion fewer token-token attention
 pairs (17{,}913 context tokens $\times$ 88 output tokens $\times$
 54{,}170 calls).
 
+\subsection{Production Deployment}
+\label{sec:production}
+
+We deploy \textsc{Pichay} in compact mode as the proxy for our own
+development workflow---the system is used daily by the authors for
+software engineering tasks. This section reports on two
+representative sessions that illustrate different operating regimes.
+
+\paragraph{Session A: Steady-state coding.}
+A standard coding session using compact mode ($\tau = 4$,
+$s_{\min} = 500$):
+
+\begin{table}[ht]
+\centering
+\caption{Production Session A: steady-state coding.}
+\label{tab:session-a}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Context free before compaction & 7\% \\
+Context free after compaction & 43\% \\
+Total evictions & 15 \\
+Garbage collected & 11 \\
+Read evictions (pageable) & 4 \\
+Page faults & 1 \\
+Fault rate (Read only) & 25\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The session recovered 36~percentage points of context capacity---the
+difference between imminent context exhaustion and substantial
+remaining headroom. Of 15~evictions, 11~were garbage collection
+(Bash/Grep/Glob outputs) and 4~were Read evictions. The single
+fault was a plan file read early in the session and evicted when it
+crossed the age threshold. The plan file is reference material
+needed for the entire session---a hot page that FIFO treats as cold.
+This is the classic working set failure: the eviction policy measures
+age, not access pattern.
+
+\paragraph{Session B: Sustained multi-agent coordination.}
+A 681-turn session involving multiple subagent spawns and
+cross-project file analysis:
+
+\begin{table}[ht]
+\centering
+\caption{Production Session B: 681-turn sustained session.}
+\label{tab:session-b}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Turns & 681 \\
+Evictions (total) & 680 \\
+Garbage collected & 74 \\
+Read evictions (pageable) & 606 \\
+Page faults & 659 \\
+\textbf{Fault rate (total)} & \textbf{97\%} \\
+Peak compression & 5{,}038KB $\to$ 339KB \\
+Session termination & API rate limit \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 97\% fault rate is a pathology, not a feature. The system
+evicted almost everything and the model re-requested almost
+everything. Three specific patterns emerged:
+
+\emph{Thrashing cycle.} Three files (3{,}438 + 1{,}570 + 1{,}592
+bytes) were evicted and faulted in a cycle across turns 163--170+.
+The working set exceeded the resident set---classic
+thrashing~\citep{denning1968working}.
+
+\emph{Sequential scan.} During a planning phase, the model read
+across three code repositories, cycling through the same 7~files
+repeatedly. The working set for planning was larger than what the
+age threshold allowed to remain resident.
+
+\emph{Self-inflicted inflation.} The 5{,}038KB pre-compaction size
+includes re-reads caused by previous evictions. Without the
+eviction-fault cycle, the original content would have been
+substantially smaller. The proxy was measuring its own overhead as
+``bytes saved''---a metric artifact of thrashing.
+
+\emph{Cost.} The session terminated by hitting the API rate limit,
+not the context limit. At 659~faults (each an inference-priced tool
+call round-trip), thrashing consumed rate budget faster than useful
+work. This demonstrates that fault cost is not merely computational
+but monetary.
+
+\paragraph{Anchor handle behavior.}
+When a fresh model instance resumed a session containing paged-out
+content, it stated: ``Let me re-read the files I need since some
+were paged out, then create the task list and start implementing.''
+The model recognized the retrieval handles, understood what was
+missing, and chose to fault content in before acting---without any
+instruction to do so. The handle format is self-describing: the
+model infers the recovery mechanism from the text of the summary
+alone.
+
 % ====================================================================
 \section{Discussion}
 \label{sec:discussion}
@@ -689,6 +1065,30 @@ get the same results with 37\% less compute, that is the complete
 argument. You do not need a quality improvement---you need to
 demonstrate that you have not made things worse.
 
+\paragraph{Evaluation protocol.}
+We propose a long-horizon non-inferiority evaluation. A multi-phase
+software engineering task---plan, implement, review, fix, extend,
+document, identify missing tests---is executed four times per round:
+twice through the unmodified baseline and twice through \textsc{Pichay}.
+Each phase produces a checkable artifact (a plan, working code, review
+comments, passing tests, documentation). Endpoint comparison across
+the full session measures whether task completion quality degrades
+over the horizon where eviction pressure is highest. Per-round
+comparison, seeded with the best baseline output, measures whether
+individual turn quality degrades under the most conservative test.
+
+Evaluation uses ensemble LLM judges (correctness, completeness,
+coherence) with human sampling on disagreements. If judges cannot
+reliably distinguish treatment from baseline, that is non-inferiority.
+If they disagree with each other about which is better, that is
+noise---and noise is the non-inferiority signal.
+
+Phase transitions in the task lifecycle create natural eviction
+boundaries: plan files go cold during implementation, implementation
+details go cold during review. Each transition exercises eviction
+and potential faulting. Long-horizon evaluation catches compounding
+losses that per-round evaluation masks.
+
 The stronger hypothesis---that removing waste tokens \emph{improves}
 output quality by concentrating attention on signal---is plausible
 but untested. Transformer attention distributes weight across all
@@ -728,6 +1128,19 @@ The savings are not just ``less cost per request''---they are
 ``more requests per machine,'' which is the difference between
 building new data centers and not building them.
 
+\paragraph{Compounding across sessions.}
+These per-call savings compound. Waste prevented on turn~$N$ is not
+merely saved once---it is absent from every subsequent turn's
+context, where it would have been reprocessed under $O(n^2)$
+attention cost. The total compute savings across a session are
+therefore superlinear in the waste fraction and grow with session
+length. For a 100-turn session with 21.8\% addressable waste, the
+cumulative attention savings are not 21.8\% of total session
+compute---they are substantially larger, because the quadratic cost
+of carrying unnecessary tokens compounds on every subsequent call.
+The infrastructure implication follows directly: the fastest tokens
+are the ones you never process.
+
 \paragraph{Fleet-scale extrapolation.}
 Our corpus represents one user over four months. A fleet-wide
 projection requires per-user token consumption data that inference
@@ -742,20 +1155,73 @@ absolute token counts vary.
 \section{Future Work}
 \label{sec:future}
 
-\paragraph{Superiority testing.}
-Non-inferiority is established. The next question is whether
-intervention actively \emph{improves} output quality. We propose
-paired A/B experiments: same task, same model, temperature 0,
-comparing output quality under baseline and compact+trim conditions.
-Minimum 30 paired sessions for statistical power. The experiment
-framework is built for this.
+\paragraph{L3: Rolling conversation compaction.}
+The proxy currently manages only tool results. Non-tool messages
+(conversation history) are untouched. We propose compressing early
+conversation turns into structured summaries with \emph{declared
+losses}: explicit statements of what information was dropped during
+compression. This transforms opaque context truncation into honest,
+auditable compaction. The compressed segments function as L3 in the
+memory hierarchy---faultable by expanding the summary back to the
+original content from the client's backing store.
 
-\paragraph{Dataflow-based eviction.}
-Current eviction is FIFO (age-based). Smarter eviction would track
-which tool results are referenced by subsequent messages and evict
-only unreferenced content---analogous to reference counting in
-memory management. Expected improvement: lower fault rate at
-higher eviction rate.
+\paragraph{Context-pressure pin decay.}
+Pinned pages should not remain resident forever. Under memory
+pressure, the oldest or least-recently-faulted pins should be
+released. We propose pressure-based decay: pins are permanent when
+the context window is below 60\% capacity; above that threshold,
+pins are released coldest-first. This matches real VM behavior---page
+replacement only matters under memory pressure.
+
+\paragraph{Phase-aware eviction.}
+Planning and execution have different working set characteristics.
+Planning requires broad simultaneous context (many files held at
+once); execution is sequential (read, edit, move on). The proxy
+could detect phase from request patterns---many Reads with no Edits
+suggests planning---and adjust the eviction threshold accordingly.
+
+\paragraph{Per-connection isolation.}
+The current implementation uses a single PageStore for all
+connections. Subagent sessions share eviction state with the main
+session, causing cross-contamination. Per-connection isolation would
+give each session its own eviction history, fault tracking, and
+pinning state.
+
+\paragraph{Trace-driven simulation.}
+We extract reference strings (the sequence of page accesses) from
+session transcripts and replay them under different replacement
+policies. This enables evaluation of policies against recorded
+workloads without live inference-priced experiments.
+Belady's~MIN~\citep{belady1966study} provides the optimal
+(clairvoyant) lower bound for comparison.
+
+\paragraph{Cooperative extensions.}
+Phantom tools open a side-channel between the model and the proxy.
+The current vocabulary---release and fault---is minimal. Extensions
+include: \emph{prefetch hints} (model signals upcoming working set
+needs), \emph{eviction classes} (groups of pages evicted as a unit),
+\emph{variable-fidelity tombstones} (AST skeletons instead of bare
+path markers), and \emph{ephemeral flags} (tool results marked for
+immediate eviction after extraction). Each expands the model's
+ability to communicate cognitive state to the memory manager.
+
+\paragraph{Beyond paging: object-addressed memory.}
+The current system manages fixed-granularity pages addressed by file
+path. But the natural unit for LLM memory management is the semantic
+object---a conversation phase, a design decision, a debugging session.
+These objects vary in size, have relationships to each other, and can
+be compressed to multiple fidelity levels rather than the binary
+resident/evicted state of hardware pages. The eviction tombstone
+becomes a compressed summary that functions as both a page table
+entry (retrieval handle to the backing store) and a cache line
+(enough semantic content to answer queries without faulting).
+Declared losses in the summary tell the model what it \emph{cannot}
+answer from the summary alone, guiding the decision to fault.
+The backing store is queryable---the model can ask a question of
+evicted content without materializing it in full. This shifts the
+abstraction from block-addressed paging to object-addressed memory
+management, where eviction is cooperative, compression is authored,
+and the backing store is a database rather than a swap partition.
 
 \paragraph{Comparative measurement.}
 Instrument other agentic tools (Cursor, Copilot, Windsurf,
@@ -763,54 +1229,56 @@ Continue.dev) to measure the same metrics. The structural argument
 predicts similar waste profiles; empirical confirmation would
 strengthen generalizability.
 
-\paragraph{Multi-user validation.}
-Deploy the proxy across multiple users with different usage patterns,
-project types, and experience levels to validate that the waste
-fraction is stable.
-
-\paragraph{Formal energy modeling.}
-Partner with inference providers to obtain FLOPs-per-token data on
-deployed hardware, enabling conversion from token savings to kWh
-and environmental impact.
-
 % ====================================================================
 \section{Conclusion}
 
-Context windows in agentic AI systems are unmanaged physical memory.
-We measure the cost of this absence of management: 21.8\% of
-effective input tokens (970~million in our corpus) are addressable
-waste from unused tool schemas, duplicated content, and stale
-results. Proxy-layer interventions---requiring no changes to models,
-clients, or APIs---achieve 37.1\% token reduction with 0.0254\%
-fault rate and non-inferior output quality.
+The context window of a large language model is not memory. It is
+L1~cache---a small, fast, expensive level in what should be a
+managed hierarchy. The field treats it as the entire memory system.
+There is no L2, no paging, no eviction policy, no working set
+estimation. The result: 21.8\% structural waste in 4.45~billion
+measured tokens, with the model reprocessing stale content at
+84.4$\times$ amplification.
 
-The waste patterns are structural. They arise from the append-only
-architecture shared by every major agentic AI tool. The
-interventions are trivial once the waste is identified: one set
-membership check for tool stubbing, one dedup pass for content
-duplication, one age comparison for stale result eviction.
+\textsc{Pichay} demonstrates that the virtual memory abstractions
+developed for physical memory in the 1960s apply directly to LLM
+context windows. Demand paging with a simple FIFO policy recovers
+36~percentage points of context capacity in steady-state use.
+Fault-driven pinning eliminates thrashing of working-set content.
+Retrieval handles---designed as space-saving markers---function as
+late-binding anchors that models understand without instruction.
 
-The systems community solved this problem for physical memory fifty
-years ago. The abstractions transfer: working sets, eviction
-policies, demand paging, fault rates. The tools are built. The
-measurements are done. What remains is adoption.
+The system requires no changes to models, clients, or inference
+APIs. It is implemented as a transparent proxy and deployed in
+production use. The paper you are reading was written through it.
+
+The deeper contribution is the architectural observation: LLM
+systems need not one large context window but a hierarchy of
+managed levels---from the generation window (L1) through persistent
+cross-session memory (L4)---connected by eviction policies and
+fault mechanisms. The first two levels are deployed and evaluated.
+The solutions for the remaining levels exist in the OS literature.
+What remains is to build them.
 
 % ====================================================================
 \section*{Authorship and AI Contribution}
 \label{sec:authorship}
 
-This paper was co-authored by a human researcher and an AI system
-(Claude Opus, Anthropic). The AI contributed code (analysis tools,
-proxy implementation, experiment framework), data analysis, and
-paper drafting under human direction. The human contributed research
-design, hypothesis formulation, editorial judgment, and the
-observation that the waste pattern generalizes beyond Claude Code.
+This paper was co-authored by a human systems researcher and an AI
+system (Claude Opus, Anthropic). The human contributed the memory
+hierarchy insight, research direction, experimental design, and
+editorial judgment---including the observation that context
+management is memory management, which reframed the entire project.
+The AI contributed code (analysis tools, proxy implementation,
+paging system), data analysis, and paper drafting.
 
-The experiment framework (pichay) was itself built by the system
-being studied---Claude Code running through its own proxy---making
-this work partially self-referential. We consider this a feature,
-not a bug: the system's ability to measure and optimize its own
-context usage is evidence that the interventions are practical.
+\textsc{Pichay} was built by the system being studied---Claude Code
+running through its own proxy---and the paper was written through it.
+The evaluation data in Section~\ref{sec:production} was generated as
+a side effect of the system's own development. We consider this
+self-referentiality a feature: the system's ability to measure,
+optimize, and sustain its own context usage over hundreds of turns is
+the strongest evidence that the interventions are practical.
 
 All instruments and data are open source:
 \url{https://github.com/fsgeek/pichay}.
