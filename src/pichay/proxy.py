@@ -176,6 +176,72 @@ def create_app(
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
 
+    _PICHAY_STATUS_MARKER = "[pichay-system-status]"
+
+    def _inject_system_status(body: dict, ts: dict, cap: int,
+                              request_time) -> None:
+        """Inject or replace a system status block with context pressure info.
+
+        Gives the model awareness of:
+        - That it's running under Pichay (experimental virtual memory)
+        - Current time/date
+        - Memory usage relative to the hard cap (85% of context window)
+        """
+        effective = ts["last_effective"]
+        # Hard cap is 85% of the token cap (or 85% of 200k if no cap set)
+        context_limit = cap if cap > 0 else 200_000
+        hard_cap = int(context_limit * 0.85)
+        pct = (effective / context_limit * 100) if context_limit > 0 else 0
+        pressure = "low"
+        if pct > 70:
+            pressure = "high"
+        elif pct > 50:
+            pressure = "moderate"
+
+        time_str = request_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        status_text = (
+            f"{_PICHAY_STATUS_MARKER}\n"
+            f"This system is running under Pichay, an experimental "
+            f"virtual memory manager for LLM context windows. Tool "
+            f"results may be evicted and replaced with [Paged out: ...] "
+            f"summaries. You can restore evicted content using the "
+            f"memory_fault tool (pass file paths or tool_use_ids). "
+            f"You can proactively release content you no longer need "
+            f"using memory_release. If you observe anomalous behavior "
+            f"(missing context, unexpected gaps, incoherent references), "
+            f"describe it to aid debugging.\n\n"
+            f"Current time: {time_str}\n"
+            f"Context usage: {effective:,} / {context_limit:,} tokens "
+            f"({pct:.0f}%) | pressure: {pressure}\n"
+            f"Hard cap: {hard_cap:,} tokens (85% of context window)"
+        )
+
+        system = body.get("system", "")
+        if isinstance(system, list):
+            # Find and replace existing status block
+            replaced = False
+            for i, block in enumerate(system):
+                if (isinstance(block, dict)
+                        and isinstance(block.get("text"), str)
+                        and _PICHAY_STATUS_MARKER in block["text"]):
+                    system[i] = {"type": "text", "text": status_text}
+                    replaced = True
+                    break
+            if not replaced:
+                system.append({"type": "text", "text": status_text})
+            body["system"] = system
+        elif isinstance(system, str):
+            # Find and replace marker in string, or append
+            if _PICHAY_STATUS_MARKER in system:
+                # Replace from marker to end (status is always last)
+                idx = system.index(_PICHAY_STATUS_MARKER)
+                body["system"] = system[:idx] + status_text
+            else:
+                body["system"] = system + "\n\n" + status_text
+        else:
+            body["system"] = status_text
+
     def _check_token_cap(usage: dict, session: dict) -> None:
         """Check effective tokens against cap, update state, emit warnings."""
         if token_cap <= 0:
@@ -491,6 +557,12 @@ def create_app(
                 f"(thinking enabled: {body.get('thinking')})",
                 file=sys.stderr,
             )
+
+        # --- System status injection ---
+        # Give the model context pressure awareness and system identification.
+        # Replaced each turn (not appended) so the model sees current state.
+        if compact:
+            _inject_system_status(body, ts, token_cap, request_time)
 
         # --- Phantom tool handling (if compact mode) ---
         observe_only = session["observe_only"]

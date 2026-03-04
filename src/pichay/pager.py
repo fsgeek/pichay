@@ -371,13 +371,23 @@ def _build_tool_use_index(messages: list[dict]) -> dict[str, dict]:
 
 
 def _make_summary(tool_name: str, tool_input: dict, original_size: int,
-                  original_content: str | list | None = None) -> str:
+                  original_content: str | list | None = None,
+                  tool_use_id: str | None = None) -> str:
     """Generate a compact summary for an evicted tool result.
 
-    The summary tells the model what WAS here and how to get it back
-    (re-issue the same tool call). No magic — just information.
+    The summary tells the model what WAS here and how to get it back.
+    For Read results: re-read or use memory_fault with the file path.
+    For all other results: use memory_fault with the tool_use_id to
+    restore from cache, since re-running may not reproduce the output.
     """
     size_str = f"{original_size:,}"
+    # Fault handle for non-file results
+    fault_hint = ""
+    if tool_use_id and tool_name != "Read":
+        fault_hint = (
+            f" Use memory_fault with id '{tool_use_id}' to restore from "
+            f"cache, or re-run if current output is preferred."
+        )
 
     if tool_name == "Read":
         path = tool_input.get("file_path", "unknown")
@@ -394,15 +404,13 @@ def _make_summary(tool_name: str, tool_input: dict, original_size: int,
         pattern = tool_input.get("pattern", "?")
         path = tool_input.get("path", ".")
         mode = tool_input.get("output_mode", "files_with_matches")
-        # Count result lines if string content
         match_info = ""
         if isinstance(original_content, str):
             result_lines = len(original_content.strip().splitlines())
             match_info = f", {result_lines} result lines"
         return (
             f"[Paged out: Grep '{pattern}' in {path} "
-            f"(mode={mode}{match_info}, {size_str} bytes). "
-            f"Re-run the search if you need results.]"
+            f"(mode={mode}{match_info}, {size_str} bytes).{fault_hint}]"
         )
 
     elif tool_name == "Glob":
@@ -412,44 +420,43 @@ def _make_summary(tool_name: str, tool_input: dict, original_size: int,
             matches = len(original_content.strip().splitlines())
             match_info = f", {matches} matches"
         return (
-            f"[Paged out: Glob '{pattern}'{match_info} ({size_str} bytes). "
-            f"Re-run if you need the file list.]"
+            f"[Paged out: Glob '{pattern}'{match_info} ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
     elif tool_name == "Bash":
         cmd = tool_input.get("command", "?")
-        # Truncate long commands
         if len(cmd) > 120:
             cmd = cmd[:117] + "..."
         return (
-            f"[Paged out: Bash `{cmd}` ({size_str} bytes). "
-            f"Re-run the command if you need its output.]"
+            f"[Paged out: Bash `{cmd}` ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
     elif tool_name == "WebFetch":
         url = tool_input.get("url", "?")
         return (
-            f"[Paged out: WebFetch {url} ({size_str} bytes). "
-            f"Re-fetch if you need the content.]"
+            f"[Paged out: WebFetch {url} ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
     elif tool_name == "WebSearch":
         query = tool_input.get("query", "?")
         return (
-            f"[Paged out: WebSearch '{query}' ({size_str} bytes). "
-            f"Re-search if you need results.]"
+            f"[Paged out: WebSearch '{query}' ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
     elif tool_name in ("Agent", "TaskOutput"):
         return (
-            f"[Paged out: {tool_name} result ({size_str} bytes). "
-            f"Content was consumed when originally returned.]"
+            f"[Paged out: {tool_name} result ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
     else:
         return (
-            f"[Paged out: {tool_name} ({size_str} bytes). "
-            f"Re-invoke the tool if you need this content.]"
+            f"[Paged out: {tool_name} ({size_str} bytes)."
+            f"{fault_hint}]"
         )
 
 
@@ -562,7 +569,8 @@ def compact_messages(
 
             # This result gets evicted
             summary = _make_summary(
-                tool_name, tool_input, original_size, original_content
+                tool_name, tool_input, original_size, original_content,
+                tool_use_id=tool_use_id,
             )
 
             # Store the original

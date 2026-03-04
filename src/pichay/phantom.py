@@ -48,10 +48,12 @@ PHANTOM_TOOL_DEFINITIONS = [
         "description": (
             "Request evicted content back from the memory manager. "
             "When you see a '[Paged out: ...]' marker for content you "
-            "need, call this instead of re-reading the file. The memory "
-            "manager will restore the content directly — faster and "
-            "cheaper than a file system read. You can request multiple "
-            "files at once."
+            "need, call this instead of re-reading the file or re-running "
+            "the command. The memory manager will restore the content "
+            "directly — faster and cheaper than a file system read. You "
+            "can request multiple items at once. Pass file paths for "
+            "Read results, or tool_use_ids (from the paged-out marker) "
+            "for Bash, Grep, Agent, and other non-file results."
         ),
         "input_schema": {
             "type": "object",
@@ -59,7 +61,10 @@ PHANTOM_TOOL_DEFINITIONS = [
                 "paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "File paths to restore from eviction cache",
+                    "description": (
+                        "File paths to restore from eviction cache, "
+                        "or tool_use_ids for non-file results"
+                    ),
                 }
             },
             "required": ["paths"],
@@ -191,25 +196,32 @@ def _handle_phantom_call(call: PhantomCall, page_store) -> str:
         restored = []
         not_found = []
         if page_store is not None:
-            for path in paths:
-                entry = page_store._eviction_index.get(path)
+            for identifier in paths:
+                # Try file path first (Read results)
+                entry = page_store._eviction_index.get(identifier)
+                if entry is None:
+                    # Try tool_use_id (Bash, Agent, Grep, etc.)
+                    entry = page_store.pages.get(identifier)
                 if entry is not None:
+                    label = identifier
+                    if entry.tool_name and entry.tool_name != "Read":
+                        label = f"{entry.tool_name} {identifier}"
                     restored.append(
                         {
-                            "path": path,
+                            "label": label,
                             "content": entry.original_content,
                             "size": entry.original_size,
                         }
                     )
                 else:
-                    not_found.append(path)
+                    not_found.append(identifier)
 
         parts = []
         for r in restored:
-            parts.append(f"--- {r['path']} ({r['size']} bytes) ---\n{r['content']}")
+            parts.append(f"--- {r['label']} ({r['size']} bytes) ---\n{r['content']}")
         if not_found:
             parts.append(
-                f"Not in cache (use Read instead): {', '.join(not_found)}"
+                f"Not in cache (use Read or re-run): {', '.join(not_found)}"
             )
         return "\n\n".join(parts) if parts else "No paths requested."
 
