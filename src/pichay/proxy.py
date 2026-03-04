@@ -51,19 +51,18 @@ DEFAULT_API_BASE = "https://api.anthropic.com"
 
 
 def _session_id(body: dict) -> str:
-    """Derive a stable session fingerprint from the request body.
+    """Derive a stable session fingerprint from the first user message.
 
-    Uses the first user message content + system prompt hash.
     Different conversations have different first messages, so this
     is unique per conversation and stable across turns (the first
     message stays in the array for the conversation's lifetime).
+
+    The system prompt is excluded because it contains dynamic content
+    (timestamps, git status, cache blocks) that changes between requests.
     """
     messages = body.get("messages", [])
     first = json.dumps(messages[0], sort_keys=True) if messages else ""
-    system = body.get("system", "")
-    if isinstance(system, list):
-        system = json.dumps(system, sort_keys=True)
-    return hashlib.sha256(f"{system}:{first}".encode()).hexdigest()[:8]
+    return hashlib.sha256(first.encode()).hexdigest()[:8]
 
 
 def find_free_port() -> int:
