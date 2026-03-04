@@ -116,6 +116,10 @@ class PageStore:
         self._fault_content: dict[str, str] = {}  # file_path → content_hash at eviction
         self.pin_count: int = 0
 
+        # Model-initiated release: paths the model says it's done with
+        self._released: set[str] = set()
+        self.release_count: int = 0
+
         # Legacy aliases for compatibility
         self.cumulative_evictions: int = 0
         self.cumulative_bytes_saved: int = 0
@@ -510,26 +514,33 @@ def compact_messages(
                 stats.skipped_error += 1
                 continue
 
-            # Skip recent results
-            if turns_from_end < age_threshold:
-                stats.skipped_recent += 1
-                stats.bytes_before += original_size
-                stats.bytes_after += original_size
-                continue
-
-            # Skip small results
-            if original_size < min_size:
-                stats.skipped_small += 1
-                stats.bytes_before += original_size
-                stats.bytes_after += original_size
-                continue
-
-            # Resolve tool identity
+            # Resolve tool identity early for release check
             tool_use_id = block.get("tool_use_id", "")
             tool_info = tool_use_index.get(tool_use_id, {})
             tool_name = tool_info.get("name", "unknown")
             tool_input = tool_info.get("input", {})
             key = _eviction_key(tool_name, tool_input)
+
+            # Model-initiated release: skip age check, evict immediately
+            released = (
+                key is not None
+                and page_store is not None
+                and key in page_store._released
+            )
+
+            # Skip recent results (unless released by the model)
+            if not released and turns_from_end < age_threshold:
+                stats.skipped_recent += 1
+                stats.bytes_before += original_size
+                stats.bytes_after += original_size
+                continue
+
+            # Skip small results (unless released)
+            if not released and original_size < min_size:
+                stats.skipped_small += 1
+                stats.bytes_before += original_size
+                stats.bytes_after += original_size
+                continue
 
             # Skip pinned content — fault history proved it's in the working set
             if key is not None and page_store is not None:
@@ -572,9 +583,115 @@ def compact_messages(
             # Replace the content
             content[block_idx] = {**block, "content": summary}
 
+            # Clear release flag after eviction
+            if released and page_store is not None:
+                page_store._released.discard(key)
+                page_store.release_count += 1
+
             stats.evicted_count += 1
             stats.bytes_before += original_size
             stats.bytes_after += len(summary.encode("utf-8"))
+
+    return stats
+
+
+@dataclass
+class ConversationCompactionStats:
+    """What happened during conversation compression."""
+
+    messages_scanned: int = 0
+    messages_compressed: int = 0
+    chars_before: int = 0
+    chars_after: int = 0
+
+    @property
+    def chars_saved(self) -> int:
+        return self.chars_before - self.chars_after
+
+
+def compact_conversation(
+    messages: list[dict],
+    *,
+    preserve_recent: int = 6,
+    min_text_chars: int = 2000,
+    max_compressed_chars: int = 200,
+) -> ConversationCompactionStats:
+    """Compress old conversation text in user and assistant messages.
+
+    Replaces large text blocks in messages older than `preserve_recent`
+    turns from the end with truncated versions plus retrieval handles.
+    Tool results and tool_use blocks are untouched (handled by
+    compact_messages). Only plain text content is compressed.
+
+    The full conversation is preserved in the proxy's JSONL log.
+
+    Args:
+        messages: The messages array (modified in place).
+        preserve_recent: Number of recent message pairs to keep intact.
+        min_text_chars: Minimum text size to consider for compression.
+        max_compressed_chars: Target size for compressed text.
+    """
+    stats = ConversationCompactionStats()
+
+    # Count user messages to determine which are "old"
+    total_messages = len(messages)
+    if total_messages <= preserve_recent * 2:
+        return stats  # Not enough messages to compress
+
+    cutoff = total_messages - (preserve_recent * 2)
+
+    for i, msg in enumerate(messages):
+        if i >= cutoff:
+            break  # Recent messages — preserve
+
+        role = msg.get("role", "")
+        if role not in ("user", "assistant"):
+            continue
+
+        content = msg.get("content", "")
+        stats.messages_scanned += 1
+
+        # Handle string content (simple text messages)
+        if isinstance(content, str):
+            if len(content) < min_text_chars:
+                continue
+            stats.chars_before += len(content)
+            # Keep first and last portions, add retrieval handle
+            head = content[:max_compressed_chars // 2]
+            tail = content[-(max_compressed_chars // 2):]
+            compressed = (
+                f"{head}\n[...archived {len(content):,} chars, "
+                f"message {i} in session log...]\n{tail}"
+            )
+            msg["content"] = compressed
+            stats.messages_compressed += 1
+            stats.chars_after += len(compressed)
+            continue
+
+        # Handle list content (structured blocks)
+        if not isinstance(content, list):
+            continue
+
+        for block_idx, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            # Only compress text blocks — leave tool_result and tool_use alone
+            if block.get("type") != "text":
+                continue
+            text = block.get("text", "")
+            if len(text) < min_text_chars:
+                continue
+
+            stats.chars_before += len(text)
+            head = text[:max_compressed_chars // 2]
+            tail = text[-(max_compressed_chars // 2):]
+            compressed = (
+                f"{head}\n[...archived {len(text):,} chars, "
+                f"message {i} in session log...]\n{tail}"
+            )
+            content[block_idx] = {**block, "text": compressed}
+            stats.messages_compressed += 1
+            stats.chars_after += len(compressed)
 
     return stats
 

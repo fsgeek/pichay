@@ -17,11 +17,17 @@ Usage:
     ANTHROPIC_BASE_URL=http://localhost:<port> claude
 
 Port 0 (default) picks a random free port to avoid collisions.
+
+Session isolation: Each distinct conversation (identified by a fingerprint
+of the first user message) gets its own token state, page store, and
+phantom call queue. This prevents cross-contamination when Claude Code
+spawns concurrent subagents through the same proxy.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import socket
 import sys
@@ -32,9 +38,32 @@ from pathlib import Path
 import httpx
 from flask import Flask, Response, request
 
-from pichay.pager import PageStore, compact_messages
+from pichay.pager import PageStore, compact_messages, compact_conversation
+from pichay.phantom import (
+    PhantomCall,
+    _handle_phantom_call,
+    filtered_stream,
+    inject_phantom_results,
+    inject_tools,
+)
 
 DEFAULT_API_BASE = "https://api.anthropic.com"
+
+
+def _session_id(body: dict) -> str:
+    """Derive a stable session fingerprint from the request body.
+
+    Uses the first user message content + system prompt hash.
+    Different conversations have different first messages, so this
+    is unique per conversation and stable across turns (the first
+    message stays in the array for the conversation's lifetime).
+    """
+    messages = body.get("messages", [])
+    first = json.dumps(messages[0], sort_keys=True) if messages else ""
+    system = body.get("system", "")
+    if isinstance(system, list):
+        system = json.dumps(system, sort_keys=True)
+    return hashlib.sha256(f"{system}:{first}".encode()).hexdigest()[:8]
 
 
 def find_free_port() -> int:
@@ -71,13 +100,12 @@ def create_app(
     session_start = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"proxy_{session_start}.jsonl"
 
-    # Token cap state (mutable dict for closure access)
-    _token_state = {"last_effective": 0, "blocked": False, "turn": 0}
     _token_warning_threshold = int(token_cap * 0.8) if token_cap > 0 else 0
 
     # ANSI colors for terminal output
     _YELLOW = "\033[33m"
     _RED = "\033[31m"
+    _DIM = "\033[2m"
     _RESET = "\033[0m"
 
     if token_cap > 0:
@@ -87,26 +115,52 @@ def create_app(
             file=sys.stderr,
         )
 
-    # Pager state (lives for the proxy session)
-    page_store = None
-    if compact:
-        page_log = log_dir / f"pages_{session_start}.jsonl"
-        page_store = PageStore(log_path=page_log)
-        print(
-            f"Compact mode: age_threshold={age_threshold}, "
-            f"min_size={min_size}",
-            file=sys.stderr,
-        )
-        print(f"Page log: {page_log}", file=sys.stderr)
+    # --- Session-keyed state ---
+    # Each conversation gets its own token state, page store, and phantom
+    # call queue. This prevents cross-contamination when multiple Claude
+    # Code conversations (including subagents) hit the proxy concurrently.
+    _sessions: dict[str, dict] = {}
 
-    # Trimmer state (lives for the proxy session)
+    def _get_session(body: dict) -> dict:
+        """Get or create per-conversation session state."""
+        sid = _session_id(body)
+        if sid not in _sessions:
+            ps = None
+            if compact:
+                page_log = log_dir / f"pages_{session_start}_{sid}.jsonl"
+                ps = PageStore(log_path=page_log)
+            _sessions[sid] = {
+                "id": sid,
+                "token_state": {
+                    "last_effective": 0,
+                    "blocked": False,
+                    "turn": 0,
+                    "calibrated": False,
+                },
+                "page_store": ps,
+                "phantom_pending": [],
+                "observe_only": False,
+            }
+            print(
+                f"  {_DIM}[{sid}] new session{_RESET}",
+                file=sys.stderr,
+            )
+        return _sessions[sid]
+
+    # Trimmer state (shared — it's stateless per-request, just caches patterns)
     trimmer = None
     if trim:
         from pichay.trimmer import SystemPromptTrimmer
-        # log_record defined below; late-bind via lambda
         trimmer = SystemPromptTrimmer()
         print(
             "Trim mode: tool stubs + skill dedup + static tracking",
+            file=sys.stderr,
+        )
+
+    if compact:
+        print(
+            f"Compact mode: age_threshold={age_threshold}, "
+            f"min_size={min_size}",
             file=sys.stderr,
         )
 
@@ -123,52 +177,59 @@ def create_app(
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
 
-    def _check_token_cap(usage: dict) -> None:
+    def _check_token_cap(usage: dict, session: dict) -> None:
         """Check effective tokens against cap, update state, emit warnings."""
         if token_cap <= 0:
             return
+        ts = session["token_state"]
+        sid = session["id"]
         effective = (
             usage.get("input_tokens", 0)
             + usage.get("cache_creation_input_tokens", 0)
             + usage.get("cache_read_input_tokens", 0)
         )
-        _token_state["last_effective"] = effective
+        ts["last_effective"] = effective
         pct = (effective / token_cap * 100) if token_cap > 0 else 0
 
         if effective > token_cap:
-            _token_state["blocked"] = True
+            ts["blocked"] = True
             print(
-                f"{_RED}  TOKEN CAP EXCEEDED: {effective:,} / {token_cap:,} "
+                f"{_RED}  [{sid}] TOKEN CAP EXCEEDED: {effective:,} / {token_cap:,} "
                 f"({pct:.0f}%) — next request will be blocked{_RESET}",
                 file=sys.stderr,
             )
             log_record({
                 "type": "token_cap",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
                 "action": "exceeded",
                 "effective_tokens": effective,
                 "token_cap": token_cap,
                 "pct": round(pct, 1),
-                "turn": _token_state["turn"],
+                "turn": ts["turn"],
             })
         elif effective > _token_warning_threshold:
             print(
-                f"{_YELLOW}  TOKEN WARNING: {effective:,} / {token_cap:,} "
+                f"{_YELLOW}  [{sid}] TOKEN WARNING: {effective:,} / {token_cap:,} "
                 f"({pct:.0f}%) — approaching cap{_RESET}",
                 file=sys.stderr,
             )
             log_record({
                 "type": "token_cap",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
                 "action": "warning",
                 "effective_tokens": effective,
                 "token_cap": token_cap,
                 "pct": round(pct, 1),
-                "turn": _token_state["turn"],
+                "turn": ts["turn"],
             })
 
-    def _display_turn_status(usage: dict) -> None:
+    def _display_turn_status(usage: dict, session: dict) -> None:
         """Post-response status line with real token count."""
+        ts = session["token_state"]
+        sid = session["id"]
+        ps = session["page_store"]
         effective = (
             usage.get("input_tokens", 0)
             + usage.get("cache_creation_input_tokens", 0)
@@ -183,8 +244,7 @@ def create_app(
             cap_str = f"/{token_cap // 1000}k ({pct:.0f}%)"
 
         ev_str = ""
-        if page_store is not None:
-            ps = page_store
+        if ps is not None:
             pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
             ev_str = (
                 f" | ev {ps.unique_evictions} gc {ps.gc_count}{pin_str}"
@@ -192,7 +252,7 @@ def create_app(
             )
 
         print(
-            f"  [Turn {_token_state['turn']}] "
+            f"  [{sid}] [Turn {ts['turn']}] "
             f"{effective:,} tok{cap_str}{ev_str}",
             file=sys.stderr,
         )
@@ -288,19 +348,22 @@ def create_app(
     def proxy_count_tokens():
         """Forward count_tokens to upstream, applying compaction first."""
         body = request.get_json(force=True)
+        session = _get_session(body)
+        sid = session["id"]
+        ps = session["page_store"]
 
         # Apply the same compaction so the count reflects reality
-        if compact and page_store is not None:
+        if compact and ps is not None:
             messages = body.get("messages", [])
             stats = compact_messages(
                 messages,
                 age_threshold=age_threshold,
                 min_size=min_size,
-                page_store=page_store,
+                page_store=ps,
             )
             if stats.evicted_count > 0:
                 print(
-                    f"  [count_tokens] compacted {stats.evicted_count} results "
+                    f"  [{sid}] [count_tokens] compacted {stats.evicted_count} results "
                     f"before counting",
                     file=sys.stderr,
                 )
@@ -321,14 +384,22 @@ def create_app(
                 _strip_response_headers(resp.headers),
             )
         except Exception as e:
-            print(f"  [count_tokens] error: {e}", file=sys.stderr)
-            return jsonify({"error": str(e)}), 502
+            print(f"  [{sid}] [count_tokens] error: {e}", file=sys.stderr)
+            return Response(
+                json.dumps({"error": str(e)}),
+                status=502,
+                content_type="application/json",
+            )
 
     @app.route("/v1/messages", methods=["POST"])
     def proxy_messages():
         """Proxy the messages endpoint with full logging."""
         request_time = datetime.now(timezone.utc)
         body = request.get_json(force=True)
+        session = _get_session(body)
+        sid = session["id"]
+        ts = session["token_state"]
+        ps = session["page_store"]
 
         # Measure without storing full content
         system_metrics = measure_system_prompt(body)
@@ -337,6 +408,7 @@ def create_app(
         request_record = {
             "type": "request",
             "timestamp": request_time.isoformat(),
+            "session": sid,
             "model": body.get("model", "unknown"),
             "max_tokens": body.get("max_tokens"),
             "stream": body.get("stream", False),
@@ -355,11 +427,18 @@ def create_app(
 
         log_record(request_record)
 
-        _token_state["turn"] += 1
+        # On first request for this session, calibrate turn counter
+        if not ts["calibrated"]:
+            messages = body.get("messages", [])
+            prior_turns = sum(1 for m in messages if m.get("role") == "assistant")
+            ts["turn"] = prior_turns
+            ts["calibrated"] = True
+
+        ts["turn"] += 1
 
         # --- Token cap gate ---
-        if token_cap > 0 and _token_state["blocked"]:
-            last = _token_state["last_effective"]
+        if token_cap > 0 and ts["blocked"]:
+            last = ts["last_effective"]
             msg = (
                 f"Token cap exceeded. Last effective context: "
                 f"{last:,} tokens (cap: {token_cap:,}). "
@@ -367,16 +446,17 @@ def create_app(
                 f"Restart with a fresh context or raise --token-cap."
             )
             print(
-                f"{_RED}  BLOCKED: {msg}{_RESET}",
+                f"{_RED}  [{sid}] BLOCKED: {msg}{_RESET}",
                 file=sys.stderr,
             )
             log_record({
                 "type": "token_cap",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
                 "action": "blocked",
                 "last_effective_tokens": last,
                 "token_cap": token_cap,
-                "turn": _token_state["turn"],
+                "turn": ts["turn"],
             })
             return Response(
                 json.dumps({
@@ -395,7 +475,7 @@ def create_app(
             trim_result = trimmer.trim(body)
             if trim_result.total_bytes_saved > 0:
                 print(
-                    f"  Trimmed: {trim_result.tools.stubbed_tools} stubs, "
+                    f"  [{sid}] Trimmed: {trim_result.tools.stubbed_tools} stubs, "
                     f"{trim_result.skills.duplicates_removed} skill dupes, "
                     f"saved {trim_result.total_bytes_saved:,} bytes",
                     file=sys.stderr,
@@ -403,23 +483,59 @@ def create_app(
 
         # --- Temperature override (if configured) ---
         # Extended thinking requires temperature=1; skip override when thinking is active.
-        # Broad check: any truthy "thinking" field means thinking is requested.
         thinking_enabled = bool(body.get("thinking"))
         if app.config.get("temperature_override") is not None and not thinking_enabled:
             body["temperature"] = app.config["temperature_override"]
         elif app.config.get("temperature_override") is not None and thinking_enabled:
             print(
-                f"  [proxy] Skipping temperature override "
+                f"  [{sid}] [proxy] Skipping temperature override "
                 f"(thinking enabled: {body.get('thinking')})",
                 file=sys.stderr,
             )
 
+        # --- Phantom tool handling (if compact mode) ---
+        observe_only = session["observe_only"]
+        if compact and ps is not None:
+            # Inject results for phantom calls from the previous turn
+            pending = session["phantom_pending"]
+            if pending:
+                messages = body.get("messages", [])
+                inject_phantom_results(messages, pending, ps, observe_only)
+                session["phantom_pending"] = []
+                released = [
+                    c for c in pending if c.name == "memory_release"
+                ]
+                faulted = [
+                    c for c in pending if c.name == "memory_fault"
+                ]
+                if released:
+                    paths = []
+                    for c in released:
+                        paths.extend(c.input.get("paths", []))
+                    print(
+                        f"  [{sid}] RELEASE: model released {len(paths)} path(s)",
+                        file=sys.stderr,
+                    )
+                if faulted:
+                    paths = []
+                    for c in faulted:
+                        paths.extend(c.input.get("paths", []))
+                    print(
+                        f"  [{sid}] PHANTOM FAULT: restored {len(paths)} path(s) "
+                        f"from cache",
+                        file=sys.stderr,
+                    )
+
+            # Inject phantom tools into the tools array
+            observe_only = inject_tools(body)
+            session["observe_only"] = observe_only
+
         # --- Context paging (if enabled) ---
-        if compact and page_store is not None:
+        if compact and ps is not None:
             messages = body.get("messages", [])
 
             # Detect page faults BEFORE compaction
-            faults = page_store.detect_faults(messages)
+            faults = ps.detect_faults(messages)
             if faults:
                 for fault in faults:
                     ago = time.monotonic() - fault.original_eviction.evicted_at
@@ -428,7 +544,7 @@ def create_app(
                     else:
                         age_str = f"{ago / 60:.1f}min ago"
                     print(
-                        f"  PAGE FAULT: {fault.tool_name} "
+                        f"  [{sid}] PAGE FAULT: {fault.tool_name} "
                         f"re-requested (evicted {age_str}, "
                         f"{fault.original_eviction.original_size:,} bytes)",
                         file=sys.stderr,
@@ -436,6 +552,7 @@ def create_app(
                 log_record({
                     "type": "page_faults",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "session": sid,
                     "count": len(faults),
                     "faults": [
                         {
@@ -445,10 +562,10 @@ def create_app(
                         }
                         for f in faults
                     ],
-                    "cumulative_faults": len(page_store.faults),
-                    "unique_evictions": page_store.unique_evictions,
-                    "gc_count": page_store.gc_count,
-                    "fault_rate": page_store.fault_rate,
+                    "cumulative_faults": len(ps.faults),
+                    "unique_evictions": ps.unique_evictions,
+                    "gc_count": ps.gc_count,
+                    "fault_rate": ps.fault_rate,
                 })
 
             # Compact
@@ -456,13 +573,14 @@ def create_app(
                 messages,
                 age_threshold=age_threshold,
                 min_size=min_size,
-                page_store=page_store,
+                page_store=ps,
             )
             if stats.evicted_count > 0:
                 post_metrics = measure_messages(body)
                 compaction_record = {
                     "type": "compaction",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "session": sid,
                     "evicted": stats.evicted_count,
                     "total_tool_results": stats.total_tool_results,
                     "bytes_before": stats.bytes_before,
@@ -472,12 +590,12 @@ def create_app(
                     "skipped_small": stats.skipped_small,
                     "skipped_recent": stats.skipped_recent,
                     "skipped_error": stats.skipped_error,
-                    "unique_evictions": page_store.unique_evictions,
-                    "gc_count": page_store.gc_count,
-                    "eviction_bytes_saved": page_store.eviction_bytes_saved,
-                    "gc_bytes_saved": page_store.gc_bytes_saved,
-                    "cumulative_faults": len(page_store.faults),
-                    "fault_rate": round(page_store.fault_rate * 100, 1),
+                    "unique_evictions": ps.unique_evictions,
+                    "gc_count": ps.gc_count,
+                    "eviction_bytes_saved": ps.eviction_bytes_saved,
+                    "gc_bytes_saved": ps.gc_bytes_saved,
+                    "cumulative_faults": len(ps.faults),
+                    "fault_rate": round(ps.fault_rate * 100, 1),
                     "messages_bytes_before": message_metrics[
                         "messages_total_bytes"
                     ],
@@ -495,10 +613,9 @@ def create_app(
                     if before_kb > 0
                     else 0
                 )
-                ps = page_store
                 pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
                 print(
-                    f"  [{before_kb:.0f}KB → {after_kb:.0f}KB]"
+                    f"  [{sid}] [{before_kb:.0f}KB \u2192 {after_kb:.0f}KB]"
                     f" ({saved_pct:.0f}% saved) "
                     f"ev {ps.unique_evictions} gc {ps.gc_count}"
                     f"{pin_str} | "
@@ -509,7 +626,23 @@ def create_app(
                 # No eviction this turn — still show working set size
                 ws_kb = message_metrics["messages_total_bytes"] / 1024
                 print(
-                    f"  [{ws_kb:.0f}KB]",
+                    f"  [{sid}] [{ws_kb:.0f}KB]",
+                    file=sys.stderr,
+                )
+
+            # Conversation compression — truncate large text in old messages
+            conv_stats = compact_conversation(messages)
+            if conv_stats.messages_compressed > 0:
+                log_record({
+                    "type": "conversation_compaction",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "session": sid,
+                    "messages_compressed": conv_stats.messages_compressed,
+                    "chars_saved": conv_stats.chars_saved,
+                })
+                print(
+                    f"  [{sid}] CONV: {conv_stats.messages_compressed} msgs compressed, "
+                    f"{conv_stats.chars_saved:,} chars saved",
                     file=sys.stderr,
                 )
 
@@ -523,9 +656,13 @@ def create_app(
             upstream_path += "?" + request.query_string.decode("utf-8")
 
         if body.get("stream", False):
-            return _proxy_streaming(body, headers, request_time, upstream_path)
+            return _proxy_streaming(
+                body, headers, request_time, upstream_path, session,
+            )
         else:
-            return _proxy_direct(body, headers, request_time, upstream_path)
+            return _proxy_direct(
+                body, headers, request_time, upstream_path, session,
+            )
 
     def _strip_response_headers(raw_headers):
         skip = {
@@ -541,7 +678,8 @@ def create_app(
             if k.lower() not in skip
         }
 
-    def _proxy_direct(body, headers, request_time, upstream_path):
+    def _proxy_direct(body, headers, request_time, upstream_path, session):
+        sid = session["id"]
         try:
             resp = client.post(
                 upstream_path, json=body, headers=headers,
@@ -553,6 +691,7 @@ def create_app(
                 log_record({
                     "type": "response",
                     "timestamp": response_time.isoformat(),
+                    "session": sid,
                     "duration_ms": int(
                         (response_time - request_time).total_seconds() * 1000
                     ),
@@ -560,12 +699,13 @@ def create_app(
                     "usage": usage,
                     "stop_reason": resp_body.get("stop_reason"),
                 })
-                _check_token_cap(usage)
-                _display_turn_status(usage)
+                _check_token_cap(usage, session)
+                _display_turn_status(usage, session)
             except Exception:
                 log_record({
                     "type": "response_error",
                     "timestamp": response_time.isoformat(),
+                    "session": sid,
                     "status_code": resp.status_code,
                 })
             return Response(
@@ -577,6 +717,7 @@ def create_app(
             log_record({
                 "type": "proxy_error",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
                 "error": str(e),
             })
             return Response(
@@ -585,7 +726,10 @@ def create_app(
                 content_type="application/json",
             )
 
-    def _proxy_streaming(body, headers, request_time, upstream_path):
+    def _proxy_streaming(body, headers, request_time, upstream_path, session):
+        sid = session["id"]
+        ps = session["page_store"]
+        observe_only = session["observe_only"]
         try:
             resp = client.send(
                 client.build_request(
@@ -598,16 +742,44 @@ def create_app(
             def generate():
                 first_byte_time = None
                 chunks_collected = []
+                phantom_calls: list[PhantomCall] = []
                 try:
-                    for chunk in resp.iter_bytes():
-                        if first_byte_time is None:
-                            first_byte_time = datetime.now(timezone.utc)
-                        chunks_collected.append(chunk)
-                        yield chunk
+                    if compact:
+                        # Filter phantom tool events from the stream
+                        for chunk in filtered_stream(
+                            resp.iter_bytes(),
+                            chunks_collected,
+                            phantom_calls,
+                            observe_only=observe_only,
+                        ):
+                            if first_byte_time is None:
+                                first_byte_time = datetime.now(timezone.utc)
+                            yield chunk
+                    else:
+                        for chunk in resp.iter_bytes():
+                            if first_byte_time is None:
+                                first_byte_time = datetime.now(timezone.utc)
+                            chunks_collected.append(chunk)
+                            yield chunk
                 finally:
                     resp.close()
                     response_time = datetime.now(timezone.utc)
                     full_response = b"".join(chunks_collected)
+
+                    # Handle phantom calls — bookkeeping only, no injection.
+                    # Injecting phantom tool_use/tool_result into the next
+                    # request's messages causes 400 "tool use concurrency"
+                    # errors. The proxy acts on the side-channel (marking
+                    # released paths, restoring faulted content) without
+                    # modifying the conversation history.
+                    if phantom_calls:
+                        for pc in phantom_calls:
+                            _handle_phantom_call(pc, ps)
+                            print(
+                                f"  [{sid}] PHANTOM{'(observe)' if observe_only else ''}: "
+                                f"{pc.name}({pc.input})",
+                                file=sys.stderr,
+                            )
 
                     usage = {}
                     try:
@@ -630,6 +802,7 @@ def create_app(
                     log_record({
                         "type": "response_stream",
                         "timestamp": response_time.isoformat(),
+                        "session": sid,
                         "duration_ms": int(
                             (response_time - request_time).total_seconds()
                             * 1000
@@ -644,8 +817,8 @@ def create_app(
                         "response_bytes": len(full_response),
                         "usage": usage,
                     })
-                    _check_token_cap(usage)
-                    _display_turn_status(usage)
+                    _check_token_cap(usage, session)
+                    _display_turn_status(usage, session)
 
             return Response(
                 generate(),
@@ -659,6 +832,7 @@ def create_app(
             log_record({
                 "type": "proxy_error",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
                 "error": str(e),
             })
             return Response(
@@ -680,9 +854,13 @@ def create_app(
             "status": "ok",
             "mode": mode,
             "log_file": str(log_file),
+            "active_sessions": len(_sessions),
         }
-        if compact and page_store is not None:
-            result["pager"] = page_store.summary()
+        if compact:
+            result["sessions"] = {
+                sid: s["page_store"].summary() if s["page_store"] else {}
+                for sid, s in _sessions.items()
+            }
         if trim and trimmer is not None:
             result["trimmer"] = trimmer.summary()
         return result
