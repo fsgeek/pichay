@@ -8,10 +8,12 @@ The framework never knows. The model and the proxy have a private
 channel.
 
 Tools:
-    memory_release(paths): Model signals it's done with these files.
-        The proxy marks them for immediate eviction.
     memory_fault(paths): Model requests evicted content back.
         The proxy resolves from PageStore, no file system round trip.
+
+Note: memory_release is handled via inline <memory_cleanup> tags
+(see tags.py) or by the framework's native memory_release tool.
+It no longer needs phantom tool infrastructure.
 """
 
 from __future__ import annotations
@@ -19,30 +21,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-PHANTOM_TOOL_NAMES = frozenset({"memory_release", "memory_fault"})
+PHANTOM_TOOL_NAMES = frozenset({"memory_fault"})
 
 PHANTOM_TOOL_DEFINITIONS = [
-    {
-        "name": "memory_release",
-        "description": (
-            "Tell the memory manager you no longer need these files in "
-            "context. They will be prioritized for eviction, freeing "
-            "context space for new content. Use this when you have "
-            "finished working with reference files and won't need them "
-            "again. This costs nothing and helps keep your context clean."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "File paths to release from context",
-                }
-            },
-            "required": ["paths"],
-        },
-    },
     {
         "name": "memory_fault",
         "description": (
@@ -185,14 +166,7 @@ def inject_phantom_results(
 def _handle_phantom_call(call: PhantomCall, page_store,
                          block_store=None) -> str:
     """Execute a phantom tool call and return the result text."""
-    if call.name == "memory_release":
-        paths = call.input.get("paths", [])
-        if page_store is not None:
-            for path in paths:
-                page_store._released.add(path)
-        return f"Released {len(paths)} path(s) from working set."
-
-    elif call.name == "memory_fault":
+    if call.name == "memory_fault":
         paths = call.input.get("paths", [])
         restored = []
         not_found = []

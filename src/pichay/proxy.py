@@ -40,6 +40,7 @@ from flask import Flask, Response, request
 
 from pichay.blocks import BlockStore
 from pichay.pager import PageStore, compact_messages, compact_conversation
+from pichay.tags import parse_cleanup_tags, strip_cleanup_tags
 from pichay.phantom import (
     PhantomCall,
     _handle_phantom_call,
@@ -180,6 +181,77 @@ def create_app(
 
     _PICHAY_STATUS_MARKER = "[pichay-system-status]"
 
+    def _process_cleanup_tags(messages: list[dict], bs: BlockStore,
+                              ps=None) -> str | None:
+        """Extract and execute cleanup tags from assistant messages.
+
+        Scans all assistant messages for <memory_cleanup> tags, executes
+        the operations on BlockStore/PageStore, and strips the tags from
+        the message text. Returns a stats string if any ops were executed.
+        """
+        from pichay.tags import parse_cleanup_tags, strip_cleanup_tags
+
+        total_ops = []
+
+        # Only process the last assistant message — cleanup tags are always
+        # in the most recent response. Processing all assistant messages
+        # would re-execute tags from prior turns on every subsequent request
+        # because the framework's persistent history retains the original text.
+        last_assistant = next(
+            (msg for msg in reversed(messages) if msg.get("role") == "assistant"),
+            None,
+        )
+        if last_assistant is None:
+            return None
+        messages = [last_assistant]
+
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+
+            content = msg.get("content", "")
+
+            if isinstance(content, str):
+                ops = parse_cleanup_tags(content)
+                if not ops.empty:
+                    total_ops.append(ops)
+                    msg["content"] = strip_cleanup_tags(content)
+
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    text = block.get("text", "")
+                    ops = parse_cleanup_tags(text)
+                    if not ops.empty:
+                        total_ops.append(ops)
+                        block["text"] = strip_cleanup_tags(text)
+
+        if not total_ops:
+            return None
+
+        # Execute all operations
+        stats_parts = []
+        for ops in total_ops:
+            for block_id in ops.drops:
+                if bs.drop(block_id):
+                    stats_parts.append(f"dropped {block_id}")
+
+            for block_id, summary in ops.summaries:
+                if bs.summarize(block_id, summary):
+                    stats_parts.append(f"summarized {block_id}")
+
+            for block_id in ops.anchors:
+                if bs.anchor(block_id):
+                    stats_parts.append(f"anchored {block_id}")
+
+            if ops.releases and ps is not None:
+                for path in ops.releases:
+                    ps.mark_released(path)
+                stats_parts.append(f"released {len(ops.releases)} path(s)")
+
+        return "; ".join(stats_parts) if stats_parts else None
+
     def _inject_system_status(body: dict, ts: dict, cap: int,
                               request_time, block_store=None) -> None:
         """Inject or replace a system status block with context pressure info.
@@ -235,6 +307,18 @@ def create_app(
                     f"({block_store.block_count} tracked):\n"
                     + "\n".join(block_lines)
                 )
+
+            # Cooperative memory instructions
+            status_text += (
+                "\n\nCooperative memory: You can manage conversation memory "
+                "by including <memory_cleanup> tags in your response. "
+                "Operations:\n"
+                "  drop: block:XXXX           — archive block content\n"
+                "  summarize: block:XXXX \"summary\" — replace with your summary\n"
+                "  anchor: block:XXXX         — mark block to keep\n"
+                "  release: path1, path2      — release file contents\n"
+                "Tags are processed on the next turn and stripped from history."
+            )
 
         system = body.get("system", "")
         if isinstance(system, list):
@@ -590,6 +674,25 @@ def create_app(
         if compact and bs is not None:
             messages = body.get("messages", [])
             bs.label_messages(messages, ts["turn"])
+
+        # --- Cleanup tag processing (Phase 2) ---
+        if compact and bs is not None:
+            messages = body.get("messages", [])
+            cleanup_stats = _process_cleanup_tags(messages, bs,
+                                                  session.get("page_store"))
+            if cleanup_stats:
+                print(
+                    f"  [{sid}] CLEANUP: {cleanup_stats}",
+                    file=sys.stderr,
+                )
+            # Apply block status to messages (replace dropped/summarized)
+            apply_stats = bs.apply_to_messages(messages)
+            applied = sum(apply_stats.values())
+            if applied:
+                print(
+                    f"  [{sid}] BLOCKS: {apply_stats}",
+                    file=sys.stderr,
+                )
 
         # --- Phantom tool handling (if compact mode) ---
         observe_only = session["observe_only"]

@@ -2,15 +2,16 @@
 
 Assigns short stable IDs to conversation message blocks based on
 content hashing. The model sees these labels and can reference them
-in cleanup operations (Phase 2).
+in cleanup operations.
 
-Phase 1: labeling only — no cleanup tag processing yet.
+Phase 1: labeling — inject [block:xxxx] markers into message content.
+Phase 2: cleanup — drop, summarize, anchor blocks via inline tags.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
+import re
 from dataclasses import dataclass, field
 
 
@@ -67,7 +68,8 @@ class BlockStore:
 
                 entry = self._get_or_create(content, role, current_turn)
                 if entry and entry.status == "resident":
-                    msg["content"] = f"[block:{entry.block_id}]\n{content}"
+                    size_k = entry.size / 1024
+                    msg["content"] = f"[block:{entry.block_id} ({size_k:.1f}KB)]\n{content}"
 
             # List content (structured blocks)
             elif isinstance(content, list):
@@ -86,7 +88,8 @@ class BlockStore:
 
                     entry = self._get_or_create(text, role, current_turn)
                     if entry and entry.status == "resident":
-                        block["text"] = f"[block:{entry.block_id}]\n{text}"
+                        size_k = entry.size / 1024
+                        block["text"] = f"[block:{entry.block_id} ({size_k:.1f}KB)]\n{text}"
 
     def _get_or_create(self, content: str, role: str,
                        turn: int) -> BlockEntry | None:
@@ -132,6 +135,90 @@ class BlockStore:
             entry.status = "resident"
             return entry.original_content
         return None
+
+    # --- Phase 2: Cleanup operations ---
+
+    def drop(self, block_id: str) -> bool:
+        """Mark a block as dropped. Content stays for audit but won't
+        appear in future messages."""
+        entry = self._by_id.get(block_id)
+        if not entry:
+            return False
+        entry.status = "dropped"
+        return True
+
+    def summarize(self, block_id: str, summary: str) -> bool:
+        """Replace a block's content with a model-authored summary."""
+        entry = self._by_id.get(block_id)
+        if not entry:
+            return False
+        entry.status = "summarized"
+        entry.summary = summary
+        return True
+
+    def anchor(self, block_id: str) -> bool:
+        """Mark a block for retention — hint to keep in working memory."""
+        entry = self._by_id.get(block_id)
+        if not entry:
+            return False
+        entry.status = "anchored"
+        return True
+
+    _BLOCK_LABEL_RE = re.compile(r"^\[block:([a-f0-9]{8,12})(?:\s*\([^)]*\))?\]\n?")
+
+    def apply_to_messages(self, messages: list[dict]) -> dict:
+        """Apply block status to messages — replace dropped/summarized content.
+
+        Modifies messages in-place. Returns stats dict.
+        """
+        stats = {"dropped": 0, "summarized": 0, "anchored": 0}
+
+        for msg in messages:
+            content = msg.get("content", "")
+
+            if isinstance(content, str):
+                msg["content"] = self._apply_to_text(content, msg, stats)
+
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "text":
+                        continue
+                    text = block.get("text", "")
+                    block["text"] = self._apply_to_text(text, msg, stats)
+
+        return stats
+
+    def _apply_to_text(self, text: str, msg: dict, stats: dict) -> str:
+        """Apply block status to a single text content."""
+        m = self._BLOCK_LABEL_RE.match(text)
+        if not m:
+            return text
+
+        block_id = m.group(1)
+        entry = self._by_id.get(block_id)
+        if not entry:
+            return text
+
+        if entry.status == "dropped":
+            stats["dropped"] += 1
+            turn_info = f"message {entry.turn} in session log"
+            return (
+                f"[...archived {entry.size:,} chars, {turn_info}...]"
+            )
+
+        if entry.status == "summarized" and entry.summary:
+            stats["summarized"] += 1
+            return (
+                f"[block:{block_id}]\n"
+                f"[Compressed (was {entry.size:,} chars)]\n"
+                f"{entry.summary}"
+            )
+
+        # resident or anchored — no change
+        if entry.status == "anchored":
+            stats["anchored"] += 1
+
+        return text
 
     @property
     def block_count(self) -> int:
