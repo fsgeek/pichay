@@ -24,19 +24,51 @@ from dataclasses import dataclass, field
 
 
 class CleanupTagFilter:
-    """Strips <memory_cleanup>...</memory_cleanup> tags from SSE text streams.
+    """Strips <memory_cleanup>...</memory_cleanup> tags from SSE text streams
+    and executes the cleanup operations inline.
 
     Tags can span multiple text_delta chunks. The filter buffers pending
-    text when it sees a partial tag opening, suppresses content inside
-    tags, and re-emits clean text outside tags.
+    text when it sees a partial tag opening, accumulates the tag body,
+    executes operations when the closing tag arrives, and re-emits clean
+    text outside tags.
+
+    Pass block_store and page_store to execute operations as tags are
+    stripped. Without them, the filter only strips (no execution).
     """
 
     _OPEN = "<memory_cleanup>"
     _CLOSE = "</memory_cleanup>"
 
-    def __init__(self) -> None:
+    def __init__(self, block_store=None, page_store=None) -> None:
         self._inside = False
         self._pending = ""  # text that might be the start of a tag
+        self._tag_body: list[str] = []  # accumulates content inside tag
+        self._bs = block_store
+        self._ps = page_store
+        self.executed_ops: list[str] = []  # log of executed operations
+
+    def _execute_tag_body(self) -> None:
+        """Parse and execute cleanup operations from the accumulated tag body."""
+        from pichay.tags import parse_cleanup_tags
+        body = "".join(self._tag_body)
+        self._tag_body = []
+        ops = parse_cleanup_tags(f"<memory_cleanup>{body}</memory_cleanup>")
+        if ops.empty:
+            return
+        if self._bs is not None:
+            for block_id in ops.drops:
+                if self._bs.drop(block_id):
+                    self.executed_ops.append(f"dropped {block_id}")
+            for block_id, summary in ops.summaries:
+                if self._bs.summarize(block_id, summary):
+                    self.executed_ops.append(f"summarized {block_id}")
+            for block_id in ops.anchors:
+                if self._bs.anchor(block_id):
+                    self.executed_ops.append(f"anchored {block_id}")
+        if self._ps is not None and ops.releases:
+            for path in ops.releases:
+                self._ps.mark_released(path)
+            self.executed_ops.append(f"released {len(ops.releases)} path(s)")
 
     def filter(self, text: str) -> str:
         """Filter cleanup tags from a text chunk. Returns clean text."""
@@ -48,13 +80,17 @@ class CleanupTagFilter:
                 # Look for closing tag
                 close_pos = text.find(self._CLOSE, i)
                 if close_pos >= 0:
+                    # Accumulate body up to the closing tag, then execute
+                    self._tag_body.append(text[i:close_pos])
+                    self._execute_tag_body()
                     self._inside = False
                     i = close_pos + len(self._CLOSE)
                     # Skip optional newline after closing tag
                     if i < len(text) and text[i] == "\n":
                         i += 1
                 else:
-                    # Entire remaining text is inside tag — suppress
+                    # Entire remaining text is inside tag — accumulate
+                    self._tag_body.append(text[i:])
                     break
 
             elif self._pending:
@@ -316,6 +352,9 @@ def filtered_stream(
     collected_chunks,
     phantom_calls_out,
     observe_only: bool = False,
+    block_store=None,
+    page_store=None,
+    session_id: str = "",
 ):
     """Filter phantom tool events from an SSE byte stream.
 
@@ -335,7 +374,7 @@ def filtered_stream(
     phantom_block_indices: set[int] = set()
     real_tool_indices: set[int] = set()
     phantom_building: dict[int, dict] = {}
-    cleanup_filter = CleanupTagFilter()
+    cleanup_filter = CleanupTagFilter(block_store=block_store, page_store=page_store)
     buffer = b""
 
     for chunk in byte_iter:
@@ -426,6 +465,12 @@ def filtered_stream(
 
     # Flush cleanup filter — discard any partial/unclosed tag
     cleanup_filter.flush()
+    if cleanup_filter.executed_ops:
+        import sys
+        print(
+            f"  [{session_id}] CLEANUP (stream): {'; '.join(cleanup_filter.executed_ops)}",
+            file=sys.stderr,
+        )
 
 
 def _classify_event(

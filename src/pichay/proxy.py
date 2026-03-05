@@ -952,6 +952,9 @@ def create_app(
                             chunks_collected,
                             phantom_calls,
                             observe_only=observe_only,
+                            block_store=bs,
+                            page_store=session.get("page_store"),
+                            session_id=sid,
                         ):
                             if first_byte_time is None:
                                 first_byte_time = datetime.now(timezone.utc)
