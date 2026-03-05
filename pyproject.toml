@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.27",
     "flask>=3.0",
     "matplotlib>=3.10.8",
+    "anthropic>=0.84.0",
 ]
 
 [project.optional-dependencies]
