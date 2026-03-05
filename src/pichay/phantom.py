@@ -19,7 +19,105 @@ It no longer needs phantom tool infrastructure.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+
+
+class CleanupTagFilter:
+    """Strips <memory_cleanup>...</memory_cleanup> tags from SSE text streams.
+
+    Tags can span multiple text_delta chunks. The filter buffers pending
+    text when it sees a partial tag opening, suppresses content inside
+    tags, and re-emits clean text outside tags.
+    """
+
+    _OPEN = "<memory_cleanup>"
+    _CLOSE = "</memory_cleanup>"
+
+    def __init__(self) -> None:
+        self._inside = False
+        self._pending = ""  # text that might be the start of a tag
+
+    def filter(self, text: str) -> str:
+        """Filter cleanup tags from a text chunk. Returns clean text."""
+        result = []
+
+        i = 0
+        while i < len(text):
+            if self._inside:
+                # Look for closing tag
+                close_pos = text.find(self._CLOSE, i)
+                if close_pos >= 0:
+                    self._inside = False
+                    i = close_pos + len(self._CLOSE)
+                    # Skip optional newline after closing tag
+                    if i < len(text) and text[i] == "\n":
+                        i += 1
+                else:
+                    # Entire remaining text is inside tag — suppress
+                    break
+
+            elif self._pending:
+                # We have buffered text that might be a partial open tag
+                combined = self._pending + text[i:]
+                if self._OPEN in combined:
+                    # Tag completed — emit everything before it
+                    tag_pos = combined.find(self._OPEN)
+                    result.append(combined[:tag_pos])
+                    self._pending = ""
+                    self._inside = True
+                    i = tag_pos + len(self._OPEN) - len(self._pending)
+                    # Recalculate: skip past the open tag in the original text
+                    consumed_from_text = len(combined) - len(text) + i
+                    i = max(0, consumed_from_text)
+                    continue
+                elif self._OPEN.startswith(combined):
+                    # Still a partial match — keep buffering
+                    self._pending = combined
+                    break
+                else:
+                    # False alarm — emit pending and restart
+                    result.append(self._pending)
+                    self._pending = ""
+                    # Don't advance i — reprocess from same position
+
+            else:
+                # Normal state — look for tag opening
+                open_pos = text.find(self._OPEN, i)
+                partial_start = self._find_partial_open(text, i)
+
+                if open_pos >= 0 and (partial_start < 0 or open_pos <= partial_start):
+                    result.append(text[i:open_pos])
+                    self._inside = True
+                    i = open_pos + len(self._OPEN)
+                elif partial_start >= 0:
+                    # Partial tag at end of chunk — buffer it
+                    result.append(text[i:partial_start])
+                    self._pending = text[partial_start:]
+                    break
+                else:
+                    result.append(text[i:])
+                    break
+
+        return "".join(result)
+
+    def _find_partial_open(self, text: str, start: int) -> int:
+        """Find position of a partial <memory_cleanup> tag at end of text."""
+        tag = self._OPEN
+        for length in range(len(tag) - 1, 0, -1):
+            if text.endswith(tag[:length], start):
+                pos = len(text) - length
+                if pos >= start:
+                    return pos
+        return -1
+
+    def flush(self) -> str:
+        """Return any buffered text that turned out not to be a tag."""
+        pending = self._pending
+        self._pending = ""
+        # If we're still inside a tag at flush, that's a malformed tag — discard
+        self._inside = False
+        return pending
 
 PHANTOM_TOOL_NAMES = frozenset({"memory_fault"})
 
@@ -237,6 +335,7 @@ def filtered_stream(
     phantom_block_indices: set[int] = set()
     real_tool_indices: set[int] = set()
     phantom_building: dict[int, dict] = {}
+    cleanup_filter = CleanupTagFilter()
     buffer = b""
 
     for chunk in byte_iter:
@@ -258,6 +357,24 @@ def filtered_stream(
             if data_str and data_str != "[DONE]":
                 try:
                     event_data = json.loads(data_str)
+
+                    # Strip cleanup tags from text_delta events before
+                    # the framework sees them. Tags can span chunks so
+                    # CleanupTagFilter maintains state across events.
+                    if (
+                        not observe_only
+                        and event_data.get("type") == "content_block_delta"
+                    ):
+                        delta = event_data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            raw_text = delta.get("text", "")
+                            clean_text = cleanup_filter.filter(raw_text)
+                            if clean_text != raw_text:
+                                delta["text"] = clean_text
+                                event_data["delta"] = delta
+                                data_str = json.dumps(event_data)
+                                event_bytes = f"data: {data_str}".encode("utf-8")
+
                     suppress = _classify_event(
                         event_data,
                         phantom_block_indices,
@@ -306,6 +423,9 @@ def filtered_stream(
     # Flush remaining buffer
     if buffer:
         yield buffer
+
+    # Flush cleanup filter — discard any partial/unclosed tag
+    cleanup_filter.flush()
 
 
 def _classify_event(
