@@ -60,6 +60,109 @@ from pichay.phantom import (
 DEFAULT_API_BASE = "https://api.anthropic.com"
 
 
+def _phantom_continuation(
+    body: dict,
+    phantom_calls: list[PhantomCall],
+    page_store,
+    block_store,
+    headers: dict,
+    upstream_path: str,
+    client: httpx.Client,
+    chunks_collected: list,
+    sid: str,
+):
+    """Gateway auto-continue: execute phantom tools and stream continuation.
+
+    When the model calls phantom tools (yuyay, qunqay), the proxy handles
+    them and immediately sends a continuation request with the tool results.
+    The model continues generating without a turn boundary. The framework
+    never sees the phantom tools — just one seamless response.
+
+    Yields SSE bytes that extend the original response stream.
+    """
+    # Build the assistant message content with phantom tool_use blocks
+    # (We need to reconstruct what the model actually said)
+    assistant_content = []
+    for pc in phantom_calls:
+        assistant_content.append({
+            "type": "tool_use",
+            "id": pc.tool_use_id,
+            "name": pc.name,
+            "input": pc.input,
+        })
+
+    # Build tool_result messages
+    tool_results = []
+    for pc in phantom_calls:
+        result_text = _handle_phantom_call(pc, page_store,
+                                           block_store=block_store)
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": pc.tool_use_id,
+            "content": result_text,
+        })
+
+    # Continuation messages: original messages + assistant + user with results
+    messages = list(body.get("messages", []))
+    messages.append({"role": "assistant", "content": assistant_content})
+    messages.append({"role": "user", "content": tool_results})
+
+    # Build continuation request (same params, updated messages)
+    cont_body = {**body, "messages": messages, "stream": True}
+
+    print(
+        f"  [{sid}] CONTINUATION: {len(phantom_calls)} phantom call(s), "
+        f"sending {len(messages)} messages",
+        file=sys.stderr,
+    )
+
+    try:
+        cont_resp = client.send(
+            client.build_request(
+                "POST", upstream_path,
+                json=cont_body, headers=headers,
+            ),
+            stream=True,
+        )
+
+        # Stream continuation, suppressing message_start
+        # (framework already received one from the first response)
+        buffer = b""
+        for chunk in cont_resp.iter_bytes():
+            chunks_collected.append(chunk)
+            buffer += chunk
+
+            while b"\n\n" in buffer:
+                event_bytes, buffer = buffer.split(b"\n\n", 1)
+                event_text = event_bytes.decode("utf-8", errors="replace")
+
+                data_str = None
+                for line in event_text.split("\n"):
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+
+                suppress = False
+                if data_str and data_str != "[DONE]":
+                    try:
+                        evt = json.loads(data_str)
+                        # Suppress message_start — framework already has one
+                        if evt.get("type") == "message_start":
+                            suppress = True
+                    except json.JSONDecodeError:
+                        pass
+
+                if not suppress:
+                    yield event_bytes + b"\n\n"
+
+        if buffer:
+            yield buffer
+
+        cont_resp.close()
+    except Exception as e:
+        print(f"  [{sid}] CONTINUATION STREAM ERROR: {e}", file=sys.stderr)
+        raise
+
+
 def _session_id(body: dict) -> str:
     """Derive a stable session fingerprint from the first user message.
 
@@ -693,6 +796,7 @@ def create_app(
                 first_byte_time = None
                 chunks_collected = []
                 phantom_calls: list[PhantomCall] = []
+                continuation_needed: list[bool] = []
                 try:
                     if compact:
                         # Filter phantom tool events from the stream
@@ -704,6 +808,7 @@ def create_app(
                             block_store=session["block_store"],
                             page_store=session.get("page_store"),
                             session_id=sid,
+                            continuation_needed=continuation_needed,
                         ):
                             if first_byte_time is None:
                                 first_byte_time = datetime.now(timezone.utc)
@@ -719,12 +824,10 @@ def create_app(
                     response_time = datetime.now(timezone.utc)
                     full_response = b"".join(chunks_collected)
 
-                    # Handle phantom calls and store for injection on next request.
-                    # Data-returning calls (yuyay) need their results injected
-                    # into the next request so the model sees the recalled content.
-                    # Fire-and-forget calls (qunqay) just need bookkeeping.
+                    # Handle phantom calls — gateway mode.
+                    # The proxy executes phantom tools and auto-continues
+                    # so the model gets results without a turn boundary.
                     if phantom_calls:
-                        data_returning = []
                         for pc in phantom_calls:
                             _handle_phantom_call(pc, ps,
                                                 block_store=session.get("block_store"))
@@ -733,12 +836,33 @@ def create_app(
                                 f"{pc.name}({pc.input})",
                                 file=sys.stderr,
                             )
-                            # yuyay/recall/memory_fault return data the model needs
-                            if pc.name in ("yuyay", "recall", "memory_fault"):
-                                data_returning.append(pc)
-                        # Store data-returning calls for injection on next request
-                        if data_returning:
-                            session["phantom_pending"] = data_returning
+
+                    # Auto-continue: if filtered_stream suppressed the stop
+                    # events, we need to execute phantom tools and send the
+                    # results back so the model can continue generating.
+                    if continuation_needed and phantom_calls and not observe_only:
+                        try:
+                            yield from _phantom_continuation(
+                                body, phantom_calls, ps,
+                                session.get("block_store"),
+                                headers, upstream_path, client,
+                                chunks_collected, sid,
+                            )
+                        except Exception as e:
+                            print(
+                                f"  [{sid}] CONTINUATION ERROR: {e}",
+                                file=sys.stderr,
+                            )
+                            # Fallback: yield stop events so stream is valid
+                            stop_delta = json.dumps({
+                                "type": "message_delta",
+                                "delta": {"stop_reason": "end_turn"},
+                                "usage": {},
+                            })
+                            stop_msg = json.dumps({"type": "message_stop"})
+                            yield f"data: {stop_delta}\n\n".encode()
+                            yield f"data: {stop_msg}\n\n".encode()
+                            yield b"data: [DONE]\n\n"
 
                     usage = {}
                     try:

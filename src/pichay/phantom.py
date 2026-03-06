@@ -432,6 +432,7 @@ def filtered_stream(
     block_store=None,
     page_store=None,
     session_id: str = "",
+    continuation_needed: list | None = None,
 ):
     """Filter phantom tool events from an SSE byte stream.
 
@@ -452,6 +453,8 @@ def filtered_stream(
     real_tool_indices: set[int] = set()
     phantom_building: dict[int, dict] = {}
     cleanup_filter = CleanupTagFilter(block_store=block_store, page_store=page_store)
+    if continuation_needed is None:
+        continuation_needed = []
     buffer = b""
 
     for chunk in byte_iter:
@@ -469,6 +472,11 @@ def filtered_stream(
             for line in event_text.split("\n"):
                 if line.startswith("data: "):
                     data_str = line[6:]
+
+            # Suppress [DONE] when continuation is pending —
+            # the continuation will provide its own [DONE]
+            if data_str == "[DONE]" and continuation_needed:
+                continue
 
             if data_str and data_str != "[DONE]":
                 try:
@@ -498,9 +506,10 @@ def filtered_stream(
                         phantom_building,
                         phantom_calls_out,
                     )
-                    # When all content blocks were phantom, the framework
-                    # would receive an empty response. Inject a synthetic
-                    # text block and rewrite stop_reason before message_delta.
+                    # When all content blocks were phantom, the gateway
+                    # needs to auto-continue: execute the phantom tool and
+                    # send the result back for the model to continue.
+                    # Suppress stop events so the caller can do continuation.
                     if (
                         not observe_only
                         and event_data.get("type") == "message_delta"
@@ -509,27 +518,24 @@ def filtered_stream(
                     ):
                         delta = event_data.get("delta", {})
                         if delta.get("stop_reason") == "tool_use":
-                            delta["stop_reason"] = "end_turn"
-                            # Inject synthetic text block so response isn't empty
-                            synthetic_start = json.dumps({
-                                "type": "content_block_start",
-                                "index": 0,
-                                "content_block": {"type": "text", "text": ""},
-                            })
-                            synthetic_delta = json.dumps({
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {"type": "text_delta", "text": "[released from context]"},
-                            })
-                            synthetic_stop = json.dumps({
-                                "type": "content_block_stop",
-                                "index": 0,
-                            })
-                            yield f"data: {synthetic_start}\n\n".encode()
-                            yield f"data: {synthetic_delta}\n\n".encode()
-                            yield f"data: {synthetic_stop}\n\n".encode()
-                            rewritten = "data: " + json.dumps(event_data)
-                            event_bytes = rewritten.encode("utf-8")
+                            # Signal continuation needed
+                            continuation_needed.append(True)
+                            # Suppress this event — continuation will
+                            # provide its own stop events
+                            suppress = True
+                except json.JSONDecodeError:
+                    pass
+
+            # Also suppress message_stop when continuation is pending
+            if (
+                not suppress
+                and continuation_needed
+                and data_str and data_str != "[DONE]"
+            ):
+                try:
+                    evt = json.loads(data_str)
+                    if evt.get("type") == "message_stop":
+                        suppress = True
                 except json.JSONDecodeError:
                     pass
 
