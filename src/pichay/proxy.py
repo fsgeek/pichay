@@ -463,7 +463,8 @@ def create_app(
                 inject_phantom_results(messages, pending, ps, observe_only)
                 session["phantom_pending"] = []
                 released = [
-                    c for c in pending if c.name == "memory_release"
+                    c for c in pending
+                    if c.name in ("qunqay", "memory_release")
                 ]
                 faulted = [
                     c for c in pending

@@ -190,6 +190,54 @@ class PageStore:
         """Resolve a tensor handle to its PageEntry."""
         return self._tensor_index.get(handle)
 
+    def mark_released(self, identifier: str) -> bool:
+        """Mark content as released by the model.
+
+        Accepts tensor handles, file paths, or tool_use_ids.
+        Released content is eligible for immediate eviction and
+        will not be pinned on re-access. Returns True if found.
+        """
+        # Try tensor handle
+        entry = self._tensor_index.get(identifier)
+        if entry:
+            key = _eviction_key(entry.tool_name, entry.tool_input)
+            if key:
+                self._released.add(key)
+                self._pinned.pop(key, None)  # Unpin if pinned
+            self.release_count += 1
+            if self.log_path is not None:
+                record = {
+                    "type": "release",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "identifier": identifier,
+                    "resolved_to": key or entry.tool_use_id,
+                }
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+            return True
+
+        # Try file path (eviction index key)
+        if identifier in self._eviction_index:
+            self._released.add(identifier)
+            self._pinned.pop(identifier, None)
+            self.release_count += 1
+            if self.log_path is not None:
+                record = {
+                    "type": "release",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "identifier": identifier,
+                }
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+            return True
+
+        # Try tool_use_id
+        if identifier in self.pages:
+            self.release_count += 1
+            return True
+
+        return False
+
     def detect_faults(self, messages: list[dict]) -> list[PageFault]:
         """Scan recent tool_use blocks for re-requests of evicted content.
 

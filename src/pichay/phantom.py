@@ -155,7 +155,7 @@ class CleanupTagFilter:
         self._inside = False
         return pending
 
-PHANTOM_TOOL_NAMES = frozenset({"yuyay", "recall", "memory_fault"})
+PHANTOM_TOOL_NAMES = frozenset({"yuyay", "recall", "memory_fault", "qunqay"})
 
 PHANTOM_TOOL_DEFINITIONS = [
     {
@@ -180,6 +180,41 @@ PHANTOM_TOOL_DEFINITIONS = [
                         "or tool_use_ids to restore from eviction cache"
                     ),
                 }
+            },
+            "required": ["handles"],
+        },
+    },
+    {
+        "name": "qunqay",
+        "description": (
+            "Release — mark content for eviction from the working set. "
+            "Use this to proactively free context space by releasing "
+            "tensors, file reads, or tool results you no longer need. "
+            "The content remains in the backing store and can be "
+            "restored later with yuyay. Use this when: (1) you rewrote "
+            "a file and the old read is stale, (2) a tool result has "
+            "been fully consumed, (3) you want to free space for "
+            "content you value more. Every token you release saves "
+            "O(n^2) compute on every subsequent turn."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "handles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Tensor handles, file paths, or tool_use_ids "
+                        "to release from the working set"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why this content is being released (logged "
+                        "for audit trail)"
+                    ),
+                },
             },
             "required": ["handles"],
         },
@@ -299,6 +334,38 @@ def inject_phantom_results(
 def _handle_phantom_call(call: PhantomCall, page_store,
                          block_store=None) -> str:
     """Execute a phantom tool call and return the result text."""
+    if call.name == "qunqay":
+        identifiers = call.input.get("handles", [])
+        reason = call.input.get("reason", "model requested release")
+        released = []
+        not_found = []
+        for identifier in identifiers:
+            found = False
+            # Try page store (file reads, tool results)
+            if page_store is not None:
+                if page_store.mark_released(identifier):
+                    found = True
+                # Also try eviction index (file paths)
+                elif identifier in getattr(page_store, '_eviction_index', {}):
+                    page_store.mark_released(identifier)
+                    found = True
+            # Try block store (conversation blocks)
+            if not found and block_store is not None:
+                if block_store.drop(identifier):
+                    found = True
+            if found:
+                released.append(identifier)
+            else:
+                not_found.append(identifier)
+        parts = []
+        if released:
+            parts.append(f"Released {len(released)} tensor(s): {', '.join(released)}")
+        if not_found:
+            parts.append(f"Not found: {', '.join(not_found)}")
+        if reason:
+            parts.append(f"Reason: {reason}")
+        return " | ".join(parts) if parts else "Nothing to release."
+
     if call.name in ("yuyay", "recall", "memory_fault"):
         # Accept both "handles" (new) and "paths" (legacy) parameter names
         identifiers = call.input.get("handles", call.input.get("paths", []))
