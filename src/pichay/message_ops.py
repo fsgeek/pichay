@@ -104,13 +104,13 @@ def inject_system_status(body: dict, ts: dict, cap: int,
     status_text = (
         f"{PICHAY_STATUS_MARKER}\n"
         f"This system is running under Pichay, an experimental "
-        f"virtual memory manager for LLM context windows. Tool "
-        f"results may be evicted and replaced with [Paged out: ...] "
-        f"summaries. You can restore evicted content using the "
-        f"memory_fault tool (pass file paths or tool_use_ids). "
-        f"You can proactively release content you no longer need "
-        f"using memory_release. If you observe anomalous behavior "
-        f"(missing context, unexpected gaps, incoherent references), "
+        f"virtual memory manager for LLM context windows. Evicted "
+        f"content is replaced with [tensor:handle — description] "
+        f"markers. Use the recall tool with the tensor handle(s) to "
+        f"restore content. Faster and cheaper than re-reading files. "
+        f"You can proactively release tensors you "
+        f"no longer need using memory_release. If you observe "
+        f"anomalous behavior (missing context, unexpected gaps), "
         f"describe it to aid debugging.\n\n"
         f"Current time: {time_str}\n"
         f"Context usage: {effective:,} / {context_limit:,} tokens "
@@ -144,6 +144,29 @@ def inject_system_status(body: dict, ts: dict, cap: int,
             "  release: path1, path2      — release file contents\n"
             "Tags are processed on the next turn and stripped from history."
         )
+
+    # --- End-of-messages anchor (temporal perception experiment) ---
+    # Inject a compact status line at the end of the messages array
+    # so the model treats it as current data, not historical setup.
+    messages = body.get("messages", [])
+    if messages and effective > 0:
+        local_time_str = request_time.astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        anchor = (
+            f"\n[pichay-live-status] "
+            f"Time: {local_time_str} | "
+            f"Context: {effective:,}/{context_limit:,} tok ({pct:.0f}%) | "
+            f"Pressure: {pressure}"
+        )
+        last_msg = messages[-1]
+        if last_msg.get("role") == "user":
+            content = last_msg.get("content", "")
+            if isinstance(content, str):
+                last_msg["content"] = content + anchor
+            elif isinstance(content, list):
+                last_msg["content"].append({
+                    "type": "text",
+                    "text": anchor,
+                })
 
     system = body.get("system", "")
     if isinstance(system, list):

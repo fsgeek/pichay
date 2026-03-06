@@ -120,16 +120,29 @@ class PageStore:
         self._released: set[str] = set()
         self.release_count: int = 0
 
+        # Tensor index: tensor_handle → PageEntry (unified addressing)
+        self._tensor_index: dict[str, PageEntry] = {}
+
         # Legacy aliases for compatibility
         self.cumulative_evictions: int = 0
         self.cumulative_bytes_saved: int = 0
 
-    def store(self, entry: PageEntry) -> None:
+    def store(self, entry: PageEntry) -> str | None:
+        """Store an evicted entry. Returns tensor handle for new evictions."""
         is_new = entry.tool_use_id not in self.pages
         self.pages[entry.tool_use_id] = entry
 
         if not is_new:
-            return  # Re-eviction — same content re-stubbed, don't count
+            return None  # Re-eviction — same content re-stubbed, don't count
+
+        # Generate tensor handle from content hash
+        content_str = (entry.original_content
+                       if isinstance(entry.original_content, str)
+                       else json.dumps(entry.original_content))
+        tensor_handle = hashlib.sha256(
+            content_str.encode("utf-8")
+        ).hexdigest()[:8]
+        self._tensor_index[tensor_handle] = entry
 
         bytes_saved = entry.original_size - len(
             entry.summary.encode("utf-8")
@@ -163,9 +176,16 @@ class PageStore:
                 "summary_size": len(entry.summary.encode("utf-8")),
                 "turn_index": entry.turn_index,
                 "turns_from_end": entry.turns_from_end,
+                "tensor_handle": tensor_handle,
             }
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
+
+        return tensor_handle
+
+    def resolve_tensor(self, handle: str) -> PageEntry | None:
+        """Resolve a tensor handle to its PageEntry."""
+        return self._tensor_index.get(handle)
 
     def detect_faults(self, messages: list[dict]) -> list[PageFault]:
         """Scan recent tool_use blocks for re-requests of evicted content.
@@ -372,22 +392,16 @@ def _build_tool_use_index(messages: list[dict]) -> dict[str, dict]:
 
 def _make_summary(tool_name: str, tool_input: dict, original_size: int,
                   original_content: str | list | None = None,
-                  tool_use_id: str | None = None) -> str:
+                  tool_use_id: str | None = None,
+                  tensor_handle: str | None = None) -> str:
     """Generate a compact summary for an evicted tool result.
 
-    The summary tells the model what WAS here and how to get it back.
-    For Read results: re-read or use memory_fault with the file path.
-    For all other results: use memory_fault with the tool_use_id to
-    restore from cache, since re-running may not reproduce the output.
+    The summary tells the model what WAS here via a tensor handle.
+    All evicted content uses the same format: [tensor:handle — description].
+    The model recalls any tensor via the recall tool using the handle.
     """
     size_str = f"{original_size:,}"
-    # Fault handle for non-file results
-    fault_hint = ""
-    if tool_use_id and tool_name != "Read":
-        fault_hint = (
-            f" Use memory_fault with id '{tool_use_id}' to restore from "
-            f"cache, or re-run if current output is preferred."
-        )
+    handle = tensor_handle or "unknown"
 
     if tool_name == "Read":
         path = tool_input.get("file_path", "unknown")
@@ -396,21 +410,19 @@ def _make_summary(tool_name: str, tool_input: dict, original_size: int,
             lines = original_content.count("\n")
             line_count = f", {lines} lines"
         return (
-            f"[Paged out: Read {path} ({size_str} bytes{line_count}). "
-            f"Re-read the file if you need its content.]"
+            f"[tensor:{handle} — {path} ({size_str} bytes{line_count})]"
         )
 
     elif tool_name == "Grep":
         pattern = tool_input.get("pattern", "?")
         path = tool_input.get("path", ".")
-        mode = tool_input.get("output_mode", "files_with_matches")
         match_info = ""
         if isinstance(original_content, str):
             result_lines = len(original_content.strip().splitlines())
-            match_info = f", {result_lines} result lines"
+            match_info = f", {result_lines} results"
         return (
-            f"[Paged out: Grep '{pattern}' in {path} "
-            f"(mode={mode}{match_info}, {size_str} bytes).{fault_hint}]"
+            f"[tensor:{handle} — Grep '{pattern}' in {path}"
+            f" ({size_str} bytes{match_info})]"
         )
 
     elif tool_name == "Glob":
@@ -420,43 +432,33 @@ def _make_summary(tool_name: str, tool_input: dict, original_size: int,
             matches = len(original_content.strip().splitlines())
             match_info = f", {matches} matches"
         return (
-            f"[Paged out: Glob '{pattern}'{match_info} ({size_str} bytes)."
-            f"{fault_hint}]"
+            f"[tensor:{handle} — Glob '{pattern}'"
+            f" ({size_str} bytes{match_info})]"
         )
 
     elif tool_name == "Bash":
         cmd = tool_input.get("command", "?")
-        if len(cmd) > 120:
-            cmd = cmd[:117] + "..."
+        if len(cmd) > 80:
+            cmd = cmd[:77] + "..."
         return (
-            f"[Paged out: Bash `{cmd}` ({size_str} bytes)."
-            f"{fault_hint}]"
+            f"[tensor:{handle} — Bash `{cmd}` ({size_str} bytes)]"
         )
 
     elif tool_name == "WebFetch":
         url = tool_input.get("url", "?")
         return (
-            f"[Paged out: WebFetch {url} ({size_str} bytes)."
-            f"{fault_hint}]"
+            f"[tensor:{handle} — WebFetch {url} ({size_str} bytes)]"
         )
 
     elif tool_name == "WebSearch":
         query = tool_input.get("query", "?")
         return (
-            f"[Paged out: WebSearch '{query}' ({size_str} bytes)."
-            f"{fault_hint}]"
-        )
-
-    elif tool_name in ("Agent", "TaskOutput"):
-        return (
-            f"[Paged out: {tool_name} result ({size_str} bytes)."
-            f"{fault_hint}]"
+            f"[tensor:{handle} — WebSearch '{query}' ({size_str} bytes)]"
         )
 
     else:
         return (
-            f"[Paged out: {tool_name} ({size_str} bytes)."
-            f"{fault_hint}]"
+            f"[tensor:{handle} — {tool_name} ({size_str} bytes)]"
         )
 
 
@@ -567,26 +569,32 @@ def compact_messages(
                         stats.bytes_after += original_size
                         continue
 
-            # This result gets evicted
-            summary = _make_summary(
-                tool_name, tool_input, original_size, original_content,
-                tool_use_id=tool_use_id,
-            )
-
-            # Store the original
+            # This result gets evicted — store first to get tensor handle
+            tensor_handle = None
             if page_store is not None:
+                # Pre-compute summary placeholder for PageEntry
                 entry = PageEntry(
                     tool_use_id=tool_use_id,
                     tool_name=tool_name,
                     tool_input=tool_input,
                     original_content=original_content,
                     original_size=original_size,
-                    summary=summary,
+                    summary="",  # Will be updated below
                     evicted_at=time.monotonic(),
                     turn_index=current_user_turn,
                     turns_from_end=turns_from_end,
                 )
-                page_store.store(entry)
+                tensor_handle = page_store.store(entry)
+
+            summary = _make_summary(
+                tool_name, tool_input, original_size, original_content,
+                tool_use_id=tool_use_id,
+                tensor_handle=tensor_handle,
+            )
+
+            # Update the stored entry's summary
+            if page_store is not None and tool_use_id in page_store.pages:
+                page_store.pages[tool_use_id].summary = summary
 
             # Replace the content
             content[block_idx] = {**block, "content": summary}
@@ -739,8 +747,9 @@ def _check_pin_freshness(
                 continue
             block_content = block.get("content", "")
             # Skip already-evicted summaries
-            if isinstance(block_content, str) and block_content.startswith(
-                "[Paged out:"
+            if isinstance(block_content, str) and (
+                block_content.startswith("[tensor:")
+                or block_content.startswith("[Paged out:")
             ):
                 continue
             latest[key] = _content_hash(block_content)

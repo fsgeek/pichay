@@ -6,9 +6,9 @@ the tags from the message text. No SSE stream manipulation needed.
 
 Tag format:
     <memory_cleanup>
-    drop: block:a3f2b901
-    summarize: block:7e9d4c12 "Model-authored summary of what this block contained"
-    anchor: block:c8ad36b2
+    drop: tensor:a3f2b901
+    summarize: tensor:7e9d4c12 "Model-authored summary of what this block contained"
+    anchor: tensor:c8ad36b2
     release: src/arbiter/evaluator.py, src/arbiter/rules.py
     </memory_cleanup>
 """
@@ -50,12 +50,12 @@ _TAG_PATTERN = re.compile(
     re.DOTALL,
 )
 
-# Match block ID references: block:xxxxxxxx (8-12 hex chars, no more)
-_BLOCK_ID = re.compile(r"block:([a-f0-9]{8,12})(?![a-f0-9])")
+# Match tensor/block ID references: tensor:xxxxxxxx or block:xxxxxxxx (8-12 hex chars)
+_BLOCK_ID = re.compile(r"(?:tensor|block):([a-f0-9]{8,12})(?![a-f0-9])")
 
 # Match summarize with quoted summary text
 _SUMMARIZE_PATTERN = re.compile(
-    r'summarize:\s*block:([a-f0-9]{8,12})(?![a-f0-9])\s+"([^"]*)"'
+    r'summarize:\s*(?:tensor|block):([a-f0-9]{8,12})(?![a-f0-9])\s+"([^"]*)"'
 )
 
 # Match release with comma-separated paths

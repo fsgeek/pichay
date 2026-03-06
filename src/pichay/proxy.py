@@ -466,7 +466,8 @@ def create_app(
                     c for c in pending if c.name == "memory_release"
                 ]
                 faulted = [
-                    c for c in pending if c.name == "memory_fault"
+                    c for c in pending
+                    if c.name in ("yuyay", "recall", "memory_fault")
                 ]
                 if released:
                     paths = []
@@ -477,11 +478,12 @@ def create_app(
                         file=sys.stderr,
                     )
                 if faulted:
-                    paths = []
+                    handles = []
                     for c in faulted:
-                        paths.extend(c.input.get("paths", []))
+                        handles.extend(c.input.get("handles",
+                                       c.input.get("paths", [])))
                     print(
-                        f"  [{sid}] PHANTOM FAULT: restored {len(paths)} path(s) "
+                        f"  [{sid}] RECALL: restored {len(handles)} tensor(s) "
                         f"from cache",
                         file=sys.stderr,
                     )
@@ -590,9 +592,14 @@ def create_app(
                     file=sys.stderr,
                 )
 
-            # Conversation compression — truncate large text in old messages
-            conv_stats = compact_conversation(messages)
-            if conv_stats.messages_compressed > 0:
+            # Conversation compression — disabled pending investigation.
+            # Hypothesis: compressing messages 12+ back removes context the
+            # model is actively synthesizing from, causing mid-sentence stops.
+            # Tool result eviction handles the bulk of savings (95%+).
+            # Re-enable with higher preserve_recent once we understand the
+            # interaction between compression and generation continuity.
+            conv_stats = None  # compact_conversation(messages)
+            if conv_stats is not None and conv_stats.messages_compressed > 0:
                 log_record({
                     "type": "conversation_compaction",
                     "timestamp": datetime.now(timezone.utc).isoformat(),

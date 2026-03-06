@@ -60,7 +60,7 @@ class BlockStore:
             # String content (simple user messages)
             if isinstance(content, str):
                 # Skip if already labeled
-                if content.startswith("[block:"):
+                if content.startswith("[tensor:") or content.startswith("[block:"):
                     continue
                 # Skip very short messages (not worth labeling)
                 if len(content) < 200:
@@ -69,7 +69,7 @@ class BlockStore:
                 entry = self._get_or_create(content, role, current_turn)
                 if entry and entry.status == "resident":
                     size_k = entry.size / 1024
-                    msg["content"] = f"[block:{entry.block_id} ({size_k:.1f}KB)]\n{content}"
+                    msg["content"] = f"[tensor:{entry.block_id} ({size_k:.1f}KB)]\n{content}"
 
             # List content (structured blocks)
             elif isinstance(content, list):
@@ -80,7 +80,7 @@ class BlockStore:
                         continue
                     text = block.get("text", "")
                     # Skip if already labeled
-                    if text.startswith("[block:"):
+                    if text.startswith("[tensor:") or text.startswith("[block:"):
                         continue
                     # Skip short blocks
                     if len(text) < 200:
@@ -89,7 +89,7 @@ class BlockStore:
                     entry = self._get_or_create(text, role, current_turn)
                     if entry and entry.status == "resident":
                         size_k = entry.size / 1024
-                        block["text"] = f"[block:{entry.block_id} ({size_k:.1f}KB)]\n{text}"
+                        block["text"] = f"[tensor:{entry.block_id} ({size_k:.1f}KB)]\n{text}"
 
     def _get_or_create(self, content: str, role: str,
                        turn: int) -> BlockEntry | None:
@@ -164,7 +164,7 @@ class BlockStore:
         entry.status = "anchored"
         return True
 
-    _BLOCK_LABEL_RE = re.compile(r"^\[block:([a-f0-9]{8,12})(?:\s*\([^)]*\))?\]\n?")
+    _BLOCK_LABEL_RE = re.compile(r"^\[(?:tensor|block):([a-f0-9]{8,12})(?:\s*\([^)]*\))?\]\n?")
 
     def apply_to_messages(self, messages: list[dict]) -> dict:
         """Apply block status to messages — replace dropped/summarized content.
@@ -209,8 +209,7 @@ class BlockStore:
         if entry.status == "summarized" and entry.summary:
             stats["summarized"] += 1
             return (
-                f"[block:{block_id}]\n"
-                f"[Compressed (was {entry.size:,} chars)]\n"
+                f"[tensor:{block_id} — summarized, was {entry.size:,} chars]\n"
                 f"{entry.summary}"
             )
 

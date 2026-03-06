@@ -155,34 +155,33 @@ class CleanupTagFilter:
         self._inside = False
         return pending
 
-PHANTOM_TOOL_NAMES = frozenset({"memory_fault"})
+PHANTOM_TOOL_NAMES = frozenset({"yuyay", "recall", "memory_fault"})
 
 PHANTOM_TOOL_DEFINITIONS = [
     {
-        "name": "memory_fault",
+        "name": "yuyay",
         "description": (
-            "Request evicted content back from the memory manager. "
-            "When you see a '[Paged out: ...]' marker for content you "
-            "need, call this instead of re-reading the file or re-running "
-            "the command. The memory manager will restore the content "
-            "directly — faster and cheaper than a file system read. You "
-            "can request multiple items at once. Pass file paths for "
-            "Read results, or tool_use_ids (from the paged-out marker) "
-            "for Bash, Grep, Agent, and other non-file results."
+            "Remember — restore evicted content by tensor handle. "
+            "When you see '[tensor:xxxx — description]' markers in "
+            "your context, the original content has been evicted to "
+            "save space. Call this with the tensor handle(s) to get "
+            "the content back. Faster and cheaper than re-reading "
+            "files. You can also pass file paths or tool_use_ids "
+            "for backward compatibility."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "paths": {
+                "handles": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "File paths to restore from eviction cache, "
-                        "or tool_use_ids for non-file results"
+                        "Tensor handles (e.g. 'a3f2b901'), file paths, "
+                        "or tool_use_ids to restore from eviction cache"
                     ),
                 }
             },
-            "required": ["paths"],
+            "required": ["handles"],
         },
     },
 ]
@@ -300,40 +299,51 @@ def inject_phantom_results(
 def _handle_phantom_call(call: PhantomCall, page_store,
                          block_store=None) -> str:
     """Execute a phantom tool call and return the result text."""
-    if call.name == "memory_fault":
-        paths = call.input.get("paths", [])
+    if call.name in ("yuyay", "recall", "memory_fault"):
+        # Accept both "handles" (new) and "paths" (legacy) parameter names
+        identifiers = call.input.get("handles", call.input.get("paths", []))
         restored = []
         not_found = []
-        if page_store is not None:
-            for identifier in paths:
-                # Try file path first (Read results)
+        for identifier in identifiers:
+            entry = None
+
+            # 1. Try tensor handle (unified addressing)
+            if page_store is not None:
+                entry = page_store.resolve_tensor(identifier)
+            if entry is None and block_store is not None:
+                content = block_store.restore(identifier)
+                if content is not None:
+                    restored.append({
+                        "label": f"tensor:{identifier}",
+                        "content": content,
+                        "size": len(content),
+                    })
+                    continue
+
+            # 2. Try file path (Read results)
+            if entry is None and page_store is not None:
                 entry = page_store._eviction_index.get(identifier)
-                if entry is None:
-                    # Try tool_use_id (Bash, Agent, Grep, etc.)
-                    entry = page_store.pages.get(identifier)
-                if entry is None and block_store is not None:
-                    # Try block ID (conversation blocks)
-                    content = block_store.restore(identifier)
-                    if content is not None:
-                        restored.append({
-                            "label": f"block {identifier}",
-                            "content": content,
-                            "size": len(content),
-                        })
-                        continue
-                if entry is not None:
-                    label = identifier
-                    if entry.tool_name and entry.tool_name != "Read":
-                        label = f"{entry.tool_name} {identifier}"
-                    restored.append(
-                        {
-                            "label": label,
-                            "content": entry.original_content,
-                            "size": entry.original_size,
-                        }
-                    )
-                else:
-                    not_found.append(identifier)
+
+            # 3. Try tool_use_id (legacy)
+            if entry is None and page_store is not None:
+                entry = page_store.pages.get(identifier)
+
+            if entry is not None:
+                label = f"tensor:{identifier}"
+                if entry.tool_name == "Read":
+                    path = entry.tool_input.get("file_path", identifier)
+                    label = f"tensor:{identifier} ({path})"
+                elif entry.tool_name:
+                    label = f"tensor:{identifier} ({entry.tool_name})"
+                restored.append(
+                    {
+                        "label": label,
+                        "content": entry.original_content,
+                        "size": entry.original_size,
+                    }
+                )
+            else:
+                not_found.append(identifier)
 
         parts = []
         for r in restored:
@@ -342,7 +352,7 @@ def _handle_phantom_call(call: PhantomCall, page_store,
             parts.append(
                 f"Not in cache (use Read or re-run): {', '.join(not_found)}"
             )
-        return "\n\n".join(parts) if parts else "No paths requested."
+        return "\n\n".join(parts) if parts else "No handles requested."
 
     return f"Unknown phantom tool: {call.name}"
 
