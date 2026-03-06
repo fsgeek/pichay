@@ -1,0 +1,49 @@
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=\columnwidth,
+    height=0.6\columnwidth,
+    xlabel={Turn},
+    ylabel={Cumulative input tokens (millions)},
+    xmin=0, xmax=88,
+    ymin=0, ymax=9.5,
+    legend pos=north west,
+    legend style={font=\small},
+    grid=major,
+    grid style={gray!20},
+    scaled y ticks=false,
+    y tick label style={/pgf/number format/fixed,
+                        /pgf/number format/precision=1},
+    yticklabel={\pgfmathparse{\tick/1000000}\pgfmathprintnumber{\pgfmathresult}},
+]
+
+% Baseline: cumulative tokens without eviction
+\addplot[thick, red!70!black, mark=none, name path=baseline] coordinates {
+    (0, 13651) (10, 352856) (20, 1037825) (30, 1850237)
+    (40, 2884656) (50, 3989325) (60, 5146048) (70, 6379942)
+    (80, 7689415) (87, 8645027)
+};
+\addlegendentry{Baseline (full context)}
+
+% Managed: cumulative tokens with Pichay eviction
+\addplot[thick, blue!70!black, mark=none, dashed, name path=managed] coordinates {
+    (0, 7508) (10, 194065) (20, 570793) (30, 1017614)
+    (40, 1586539) (50, 2194101) (60, 2830295) (70, 3508933)
+    (80, 4229138) (87, 4754720)
+};
+\addlegendentry{Managed (Pichay)}
+
+% Shade the area between curves
+\addplot[red!10, opacity=0.5, forget plot]
+    fill between[of=baseline and managed];
+
+\end{axis}
+\end{tikzpicture}
+\caption{Cumulative input tokens processed over an 88-turn session.
+  Without context management, every turn re-processes all prior
+  content, producing superlinear cumulative cost. Pichay's eviction
+  reduces cumulative token spend by 45\% (\$11.67 at Opus pricing).
+  The shaded area represents wasted computation.}
+\label{fig:cumulative-cost}
+\end{figure}

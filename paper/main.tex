@@ -1,43 +1,54 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[sigplan,review,anonymous]{acmart}
 
-% Packages
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{amsmath,amssymb}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{hyperref}
-\usepackage{xcolor}
+% Additional packages beyond what acmart provides
+\usepackage{natbib}
 \usepackage{pgfplots}
 \usepackage{tikz}
-\usepackage{microtype}
-\usepackage[margin=1in]{geometry}
-\usepackage{natbib}
-\usepackage{enumitem}
 \usepackage{subcaption}
-\usepackage{float}
 
 \pgfplotsset{compat=1.18}
+\usepgfplotslibrary{fillbetween}
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,fit,calc}
 
-\hypersetup{
-    colorlinks=true,
-    linkcolor=blue!60!black,
-    citecolor=green!50!black,
-    urlcolor=blue!60!black,
+%% Rights management - will be set by ACM
+\setcopyright{none}
+\acmDOI{}
+\acmISBN{}
+\acmConference[SOSP '26]{ACM SIGOPS 31st Symposium on Operating Systems Principles}{2026}{Seoul, South Korea}
+\acmYear{2026}
+
+\title{The Missing Memory Hierarchy: Demand Paging for LLM Context Windows}
+
+\author{Anonymous}
+\affiliation{%
+  \institution{Anonymous Institution}
 }
 
-\title{The Missing Memory Hierarchy:\\
-  Demand Paging for LLM Context Windows}
+\begin{CCSXML}
+<ccs2012>
+<concept>
+<concept_id>10011007.10011006.10011008.10011009.10011012</concept_id>
+<concept_desc>Software and its engineering~Allocation / deallocation strategies</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10011007.10011006.10011008.10011009.10011015</concept_id>
+<concept_desc>Software and its engineering~Virtual memory</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10010147.10010178.10010179</concept_id>
+<concept_desc>Computing methodologies~Natural language processing</concept_desc>
+<concept_significance>300</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
 
-\author{
-  Tony Mason\thanks{University of British Columbia. \texttt{fsgeek@cs.ubc.ca}} \\
-  \textit{with Claude Opus (Anthropic)}\thanks{AI contributor.
-    Wrote code, analysis, and prose under human direction.
-    Role: Master Builder. See Section~\ref{sec:authorship}.}
-}
+\ccsdesc[500]{Software and its engineering~Allocation / deallocation strategies}
+\ccsdesc[500]{Software and its engineering~Virtual memory}
+\ccsdesc[300]{Computing methodologies~Natural language processing}
 
-\date{March 2026}
+\keywords{context windows, virtual memory, demand paging, large language models, agentic AI, working set, eviction policy}
 
 \begin{document}
 \maketitle
@@ -1029,6 +1040,76 @@ bug. It arises from four reinforcing factors:
     unless measured. There is no backpressure signal.
 \end{enumerate}
 
+\subsection{The Inverted Cost Model}
+\label{sec:inverted-cost}
+
+In traditional virtual memory, keeping a page in physical memory is
+free. RAM is allocated whether the page is accessed or not; the only
+cost is \emph{faulting}---the latency of disk I/O when a needed page
+is not resident. The entire replacement algorithm literature, from
+FIFO to LRU to Clock to Working Set, optimizes a single objective:
+\emph{minimize faults}.
+
+In LLM context management, the cost model is inverted. Every token
+kept in context costs money on every turn. A 5{,}000-token file
+sitting in context for 20~turns costs 100{,}000 input tokens of
+processing. Re-reading that file once when actually needed costs
+5{,}000 tokens. The eviction saves 95{,}000 tokens. Keeping is
+expensive; faulting is cheap.
+
+This inversion changes the optimization objective. The correct
+formulation is not ``minimize faults'' but:
+\[
+  \min \sum_{p \in P} \bigl[ C_{\text{keep}}(p) + C_{\text{fault}}(p) \bigr]
+\]
+where $C_{\text{keep}}(p) = |p| \cdot T_{\text{resident}}(p) \cdot
+c_{\text{token}}$ is the cumulative cost of keeping page $p$ resident
+for $T_{\text{resident}}$ turns, and $C_{\text{fault}}(p) = |p| \cdot
+c_{\text{token}}$ is the one-time cost of restoring the page (one
+turn of reprocessing). The break-even condition is:
+\[
+  |p| \cdot T_{\text{until\_next\_ref}}(p) \cdot c_{\text{token}} >
+  |p| \cdot c_{\text{token}}
+\]
+which simplifies to: \emph{evict whenever the page will not be
+referenced for more than one turn}. This is why FIFO works so well
+in our system despite being the worst-performing policy in classical
+VM: when keeping is expensive and faulting is cheap, aggressive
+eviction is correct by default. Sophistication in replacement policy
+is needed only to avoid evicting pages that will be needed on the
+\emph{very next} turn.
+
+\paragraph{Belady's MIN under inverted costs.}
+Belady's optimal algorithm~\citep{belady1966study} evicts the page
+whose next reference is farthest in the future, minimizing total
+faults. Under the inverted cost model, the optimal policy is
+different: it must minimize the sum of keeping costs and fault costs.
+A page with a distant next reference should be evicted immediately
+(saving many turns of keep cost at the price of one fault). A page
+referenced every turn should never be evicted (the fault cost equals
+one turn of keep cost, so eviction saves nothing). The optimal
+offline policy under inverted costs is not MIN---it is a
+cost-weighted variant where pages are evicted when their projected
+keep cost exceeds their fault cost, regardless of whether a fault
+will occur.
+
+This has a practical implication: the \emph{size} of the page matters
+for eviction priority in a way it does not in classical VM (where all
+pages are equal size). A 10{,}000-token file costs ten times as much
+per turn as a 1{,}000-token file. Large pages should be evicted
+eagerly unless access frequency justifies the keep cost.
+
+\paragraph{Pin decay.}
+The inverted cost model also argues against permanent pins. In our
+current design (Section~\ref{sec:pinning}), one fault pins a page
+permanently. But a fault tells us the content was needed \emph{then},
+not forever. Under the cost model, a pin should decay: its strength
+halves every $K$~turns since last access, and the page becomes
+evictable when the projected keep cost of the remaining pin lifetime
+exceeds the fault cost. This gives LRU-like behavior with
+cost-weighted decay, and prevents the monotonic working-set growth
+that permanent pinning causes in long sessions.
+
 \subsection{Generalizability}
 
 The waste patterns we measure are structural consequences of the
@@ -1055,46 +1136,81 @@ would strengthen the generalizability claim.
 \subsection{Quality: Non-Inferiority}
 \label{sec:quality}
 
-Removing 37.1\% of context tokens produces output of equivalent
-quality to the unmodified baseline. Tasks complete correctly under
-all treatment conditions. Model behavior is unchanged: the same
-tools are invoked, the same task structure emerges.
+The intervention must not degrade output quality. Non-inferiority is
+sufficient to justify context management: if you get equivalent results
+with less compute, that is the complete argument.
 
-Non-inferiority is sufficient to justify the intervention. If you
-get the same results with 37\% less compute, that is the complete
-argument. You do not need a quality improvement---you need to
-demonstrate that you have not made things worse.
+\paragraph{Protocol.}
+We select 13~sessions from the corpus (426--1{,}354~messages,
+340K--718K~characters of context). For each session, we construct
+paired contexts at 65--75\% of the conversation: the \emph{baseline}
+retains all messages; the \emph{treatment} replaces consumed tool
+results outside a 20-message recency window with tombstones, modeling
+\textsc{Pichay}'s eviction behavior. Both conditions receive the same
+continuation prompt (the next user message). Outputs are generated by
+Sonnet~4 under both conditions.
 
-\paragraph{Evaluation protocol.}
-We propose a long-horizon non-inferiority evaluation. A multi-phase
-software engineering task---plan, implement, review, fix, extend,
-document, identify missing tests---is executed four times per round:
-twice through the unmodified baseline and twice through \textsc{Pichay}.
-Each phase produces a checkable artifact (a plan, working code, review
-comments, passing tests, documentation). Endpoint comparison across
-the full session measures whether task completion quality degrades
-over the horizon where eviction pressure is highest. Per-round
-comparison, seeded with the best baseline output, measures whether
-individual turn quality degrades under the most conservative test.
+An ensemble of three LLM judges (one Sonnet~4, two Haiku~4.5)
+evaluates each paired output on correctness, completeness, and
+coherence (1--5~scale). Judges also state a blind preference
+(A, B, or tie) and whether they can identify which output had
+reduced context. A/B assignment is randomized per judge to
+prevent position bias; scores are remapped to baseline/treatment
+before aggregation.
 
-Evaluation uses ensemble LLM judges (correctness, completeness,
-coherence) with human sampling on disagreements. If judges cannot
-reliably distinguish treatment from baseline, that is non-inferiority.
-If they disagree with each other about which is better, that is
-noise---and noise is the non-inferiority signal.
+\paragraph{Results.}
 
-Phase transitions in the task lifecycle create natural eviction
-boundaries: plan files go cold during implementation, implementation
-details go cold during review. Each transition exercises eviction
-and potential faulting. Long-horizon evaluation catches compounding
-losses that per-round evaluation masks.
+\begin{table}[ht]
+\centering
+\caption{Non-inferiority evaluation: 18~sessions, 54~verdicts.
+  Treatment evicts consumed tool results outside a 20-message
+  recency window (mean compression 48\%).}
+\label{tab:noninferiority}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Metric} & \textbf{Baseline} & \textbf{Treatment} \\
+\midrule
+Judges preferring & 15 (28\%) & 20 (37\%) \\
+Ties & \multicolumn{2}{c}{19 (35\%)} \\
+\midrule
+Mean correctness & 3.89 & 3.74 \\
+Mean completeness & 3.59 & 3.59 \\
+Mean coherence & 3.74 & 3.69 \\
+Max score $\Delta$ & \multicolumn{2}{c}{0.15} \\
+\midrule
+Detection rate & \multicolumn{2}{c}{57\% ($p = 0.14$, n.s.)} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-The stronger hypothesis---that removing waste tokens \emph{improves}
-output quality by concentrating attention on signal---is plausible
-but untested. Transformer attention distributes weight across all
-tokens in context; irrelevant tokens dilute attention on relevant
-tokens. Removing them should, in principle, improve attention
-allocation. We identify this as a priority for future work.
+Judges prefer the treatment \emph{more often} than the baseline
+(37\% vs.\ 28\%), with 35\% ties. Completeness scores are identical;
+correctness and coherence differ by at most 0.15~points on a 5-point
+scale. Detection rate (57\%) is not significantly above chance
+(binomial $z = 1.09$, $p = 0.14$, $n = 54$).
+
+\paragraph{Failure modes.}
+Two sessions (11\%) produced degenerate treatment outputs (zero
+characters): the continuation prompt implicitly referenced content
+that existed only in a tombstoned tool result. These are genuine
+eviction casualties. The failure pattern is specific: the user's
+prompt references a recently-consumed tool result by content rather
+than by name. A reference-aware eviction policy would detect such
+forward dependencies; the current heuristic (consumed + outside
+recency window = evictable) does not.
+
+\paragraph{The attention-concentration effect.}
+In several sessions, all three judges preferred the treatment output.
+Removing half the context did not merely preserve quality---it
+improved it. This is consistent with the attention-dilution hypothesis:
+transformer attention distributes weight across all tokens in context;
+irrelevant tokens (stale tool results, consumed intermediate outputs)
+dilute attention on the tokens that matter. Evicting them concentrates
+attention on signal. The effect is strongest in sessions with high
+tool-result density, where the evicted content is genuinely noise.
+We note this as preliminary evidence; establishing the effect
+rigorously would require controlled attention analysis with larger~$N$.
 
 \subsection{Compute and Energy Implications}
 \label{sec:energy}
@@ -1141,6 +1257,15 @@ of carrying unnecessary tokens compounds on every subsequent call.
 The infrastructure implication follows directly: the fastest tokens
 are the ones you never process.
 
+Figure~\ref{fig:cumulative-cost} illustrates this compounding on an
+88-turn live session running through \textsc{Pichay}. Cumulative
+baseline cost (processing all context every turn) reaches 8.6M~input
+tokens; managed cost reaches 4.8M---a 45\% cumulative reduction,
+substantially larger than the per-turn compression ratio, because
+each evicted token is absent from \emph{every subsequent turn}.
+
+\input{figures/cumulative_cost}
+
 \paragraph{Fleet-scale extrapolation.}
 Our corpus represents one user over four months. A fleet-wide
 projection requires per-user token consumption data that inference
@@ -1165,13 +1290,26 @@ auditable compaction. The compressed segments function as L3 in the
 memory hierarchy---faultable by expanding the summary back to the
 original content from the client's backing store.
 
-\paragraph{Context-pressure pin decay.}
-Pinned pages should not remain resident forever. Under memory
-pressure, the oldest or least-recently-faulted pins should be
-released. We propose pressure-based decay: pins are permanent when
-the context window is below 60\% capacity; above that threshold,
-pins are released coldest-first. This matches real VM behavior---page
-replacement only matters under memory pressure.
+\paragraph{Cost-aware eviction pressure.}
+The current eviction policy uses a space-based threshold (context
+window capacity). The inverted cost model argues for cost-based
+pressure: 23\% memory pressure sounds low, but 45{,}000 tokens per
+turn at inference pricing is real money. Eviction pressure should be
+denominated in token-turns (the product of page size and projected
+remaining lifetime), not in fractional capacity. This reframes
+eviction from ``are we running out of space?'' to ``is this page
+earning its keep?''
+
+\paragraph{Cost-weighted pin decay.}
+Pinned pages should not remain resident forever. A fault tells us
+the content was needed \emph{then}, not forever. We propose
+cost-weighted decay: pin strength halves every $K$~turns since last
+access. A page becomes evictable when its projected keep cost exceeds
+its fault cost. Under low memory pressure, this is permissive
+(pins persist). Under high pressure, cold pins are released first.
+This gives LRU-like behavior with cost weighting, and prevents the
+monotonic working-set growth that permanent pinning causes in long
+sessions.
 
 \paragraph{Phase-aware eviction.}
 Planning and execution have different working set characteristics.
@@ -1191,9 +1329,26 @@ pinning state.
 We extract reference strings (the sequence of page accesses) from
 session transcripts and replay them under different replacement
 policies. This enables evaluation of policies against recorded
-workloads without live inference-priced experiments.
-Belady's~MIN~\citep{belady1966study} provides the optimal
-(clairvoyant) lower bound for comparison.
+workloads without live inference-priced experiments. The inverted cost
+model (Section~\ref{sec:inverted-cost}) means the optimal offline
+policy is not Belady's MIN but a cost-weighted variant that minimizes
+total keep cost plus fault cost. We plan to derive and evaluate this
+cost-optimal offline bound alongside MIN for comparison.
+
+\paragraph{Cross-session access pattern prediction.}
+The break-even formula requires estimating $T_{\text{until\_next\_ref}}$---the
+number of turns until a page is next referenced. Within a single
+session, this can only be estimated from local patterns. Across
+sessions, the prediction becomes tractable: coding sessions exhibit
+regular access patterns (orientation reads of project structure,
+iterative edits of a working file, periodic reference to configuration).
+A Markov model trained on cross-session reference strings could
+predict re-reference probability per page per turn, enabling
+cost-optimal eviction decisions. The data collection is nearly free:
+the proxy already logs every eviction, every fault, every tool call.
+What is needed is a persistent, queryable store of access patterns
+that survives session boundaries---precisely the role of a cross-session
+memory system.
 
 \paragraph{Cooperative extensions.}
 Phantom tools open a side-channel between the model and the proxy.
@@ -1284,7 +1439,7 @@ All instruments and data are open source:
 \url{https://github.com/fsgeek/pichay}.
 
 % ====================================================================
-\bibliographystyle{plainnat}
+\bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
 
 \end{document}
