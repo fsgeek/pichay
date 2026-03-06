@@ -592,14 +592,10 @@ def create_app(
                     file=sys.stderr,
                 )
 
-            # Conversation compression — disabled pending investigation.
-            # Hypothesis: compressing messages 12+ back removes context the
-            # model is actively synthesizing from, causing mid-sentence stops.
-            # Tool result eviction handles the bulk of savings (95%+).
-            # Re-enable with higher preserve_recent once we understand the
-            # interaction between compression and generation continuity.
-            conv_stats = None  # compact_conversation(messages)
-            if conv_stats is not None and conv_stats.messages_compressed > 0:
+            # Conversation compression — model-authored summaries via Haiku.
+            # preserve_recent=12 keeps last 24 messages intact (was 6).
+            conv_stats = compact_conversation(messages, preserve_recent=12)
+            if conv_stats.messages_compressed > 0:
                 log_record({
                     "type": "conversation_compaction",
                     "timestamp": datetime.now(timezone.utc).isoformat(),

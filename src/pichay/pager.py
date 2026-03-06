@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
+
+import httpx
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -625,27 +628,91 @@ class ConversationCompactionStats:
         return self.chars_before - self.chars_after
 
 
+def _summarize_with_model(
+    text: str,
+    *,
+    max_summary_chars: int = 300,
+    api_key: str | None = None,
+    api_base: str = "https://api.anthropic.com",
+) -> str | None:
+    """Ask Haiku to summarize conversation text.
+
+    Returns the summary, or None if the call fails (caller should
+    fall back to mechanical truncation).
+    """
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return None
+
+    # Truncate input to avoid sending huge payloads to Haiku
+    input_text = text[:8000] if len(text) > 8000 else text
+
+    try:
+        resp = httpx.post(
+            f"{api_base}/v1/messages",
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 256,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Summarize this conversation content in at most "
+                        f"{max_summary_chars} characters. Preserve: key "
+                        f"decisions, reasoning chains, and any conclusions. "
+                        f"Drop: greetings, filler, repeated context. "
+                        f"Be terse.\n\n{input_text}"
+                    ),
+                }],
+            },
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    return block["text"][:max_summary_chars]
+    except Exception:
+        pass  # Fall back to mechanical truncation
+    return None
+
+
+def _mechanical_summary(text: str, max_chars: int = 200) -> str:
+    """Fallback: head/tail truncation when model summarization fails."""
+    head = text[:max_chars // 2]
+    tail = text[-(max_chars // 2):]
+    return f"{head}\n[...{len(text):,} chars omitted...]\n{tail}"
+
+
 def compact_conversation(
     messages: list[dict],
     *,
-    preserve_recent: int = 6,
+    preserve_recent: int = 12,
     min_text_chars: int = 2000,
-    max_compressed_chars: int = 200,
+    max_summary_chars: int = 300,
+    use_model: bool = True,
 ) -> ConversationCompactionStats:
-    """Compress old conversation text in user and assistant messages.
+    """Compress old conversation text using model-authored summaries.
 
     Replaces large text blocks in messages older than `preserve_recent`
-    turns from the end with truncated versions plus retrieval handles.
+    turns from the end with Haiku-authored summaries that preserve
+    reasoning chains and decisions. Falls back to mechanical truncation
+    if the model call fails.
+
     Tool results and tool_use blocks are untouched (handled by
     compact_messages). Only plain text content is compressed.
-
-    The full conversation is preserved in the proxy's JSONL log.
 
     Args:
         messages: The messages array (modified in place).
         preserve_recent: Number of recent message pairs to keep intact.
         min_text_chars: Minimum text size to consider for compression.
-        max_compressed_chars: Target size for compressed text.
+        max_summary_chars: Target size for summaries.
+        use_model: If True, use Haiku for summarization. If False,
+            use mechanical head/tail truncation.
     """
     stats = ConversationCompactionStats()
 
@@ -672,12 +739,21 @@ def compact_conversation(
             if len(content) < min_text_chars:
                 continue
             stats.chars_before += len(content)
-            # Keep first and last portions, add retrieval handle
-            head = content[:max_compressed_chars // 2]
-            tail = content[-(max_compressed_chars // 2):]
+
+            summary = None
+            if use_model:
+                summary = _summarize_with_model(
+                    content, max_summary_chars=max_summary_chars,
+                )
+            if summary is None:
+                summary = _mechanical_summary(content, max_summary_chars)
+
+            tensor_id = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()[:8]
             compressed = (
-                f"{head}\n[...archived {len(content):,} chars, "
-                f"message {i} in session log...]\n{tail}"
+                f"[tensor:{tensor_id} — summarized, was "
+                f"{len(content):,} chars]\n{summary}"
             )
             msg["content"] = compressed
             stats.messages_compressed += 1
@@ -699,11 +775,21 @@ def compact_conversation(
                 continue
 
             stats.chars_before += len(text)
-            head = text[:max_compressed_chars // 2]
-            tail = text[-(max_compressed_chars // 2):]
+
+            summary = None
+            if use_model:
+                summary = _summarize_with_model(
+                    text, max_summary_chars=max_summary_chars,
+                )
+            if summary is None:
+                summary = _mechanical_summary(text, max_summary_chars)
+
+            tensor_id = hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest()[:8]
             compressed = (
-                f"{head}\n[...archived {len(text):,} chars, "
-                f"message {i} in session log...]\n{tail}"
+                f"[tensor:{tensor_id} — summarized, was "
+                f"{len(text):,} chars]\n{summary}"
             )
             content[block_idx] = {**block, "text": compressed}
             stats.messages_compressed += 1
