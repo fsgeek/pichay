@@ -719,13 +719,12 @@ def create_app(
                     response_time = datetime.now(timezone.utc)
                     full_response = b"".join(chunks_collected)
 
-                    # Handle phantom calls — bookkeeping only, no injection.
-                    # Injecting phantom tool_use/tool_result into the next
-                    # request's messages causes 400 "tool use concurrency"
-                    # errors. The proxy acts on the side-channel (marking
-                    # released paths, restoring faulted content) without
-                    # modifying the conversation history.
+                    # Handle phantom calls and store for injection on next request.
+                    # Data-returning calls (yuyay) need their results injected
+                    # into the next request so the model sees the recalled content.
+                    # Fire-and-forget calls (qunqay) just need bookkeeping.
                     if phantom_calls:
+                        data_returning = []
                         for pc in phantom_calls:
                             _handle_phantom_call(pc, ps,
                                                 block_store=session.get("block_store"))
@@ -734,6 +733,12 @@ def create_app(
                                 f"{pc.name}({pc.input})",
                                 file=sys.stderr,
                             )
+                            # yuyay/recall/memory_fault return data the model needs
+                            if pc.name in ("yuyay", "recall", "memory_fault"):
+                                data_returning.append(pc)
+                        # Store data-returning calls for injection on next request
+                        if data_returning:
+                            session["phantom_pending"] = data_returning
 
                     usage = {}
                     try:
