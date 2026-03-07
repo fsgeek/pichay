@@ -258,7 +258,7 @@ def create_app(
                     "calibrated": False,
                 },
                 "page_store": ps,
-                "block_store": BlockStore() if compact else None,
+                "block_store": BlockStore(),
                 "phantom_pending": [],
                 "observe_only": False,
             }
@@ -574,12 +574,12 @@ def create_app(
 
         # --- Block labeling (conversation memory management) ---
         bs = session["block_store"]
-        if compact and bs is not None:
+        if bs is not None:
             messages = body.get("messages", [])
             bs.label_messages(messages, ts["turn"])
 
         # --- Cleanup tag processing (Phase 2) ---
-        if compact and bs is not None:
+        if bs is not None:
             messages = body.get("messages", [])
             cleanup_stats = process_cleanup_tags(messages, bs,
                                                   session.get("page_store"))
