@@ -110,9 +110,10 @@ def _phantom_continuation(
     # Build continuation request (same params, updated messages)
     cont_body = {**body, "messages": messages, "stream": True}
 
+    cont_size = len(json.dumps(cont_body))
     print(
         f"  [{sid}] CONTINUATION: {len(phantom_calls)} phantom call(s), "
-        f"sending {len(messages)} messages",
+        f"sending {len(messages)} messages, {cont_size // 1024}KB",
         file=sys.stderr,
     )
 
@@ -145,8 +146,16 @@ def _phantom_continuation(
                 if data_str and data_str != "[DONE]":
                     try:
                         evt = json.loads(data_str)
-                        # Suppress message_start — framework already has one
-                        if evt.get("type") == "message_start":
+                        # Suppress envelope events — the framework already
+                        # has message_start/message_delta/message_stop from
+                        # the original response.  The continuation is an
+                        # internal gateway round-trip; only content_block
+                        # events should leak through to the client.
+                        if evt.get("type") in (
+                            "message_start",
+                            "message_delta",
+                            "message_stop",
+                        ):
                             suppress = True
                     except json.JSONDecodeError:
                         pass
