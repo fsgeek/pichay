@@ -48,6 +48,7 @@ from pichay.message_ops import (
     inject_system_status,
     measure_system_prompt,
     measure_messages,
+    sanitize_messages,
     strip_response_headers,
 )
 from pichay.phantom import (
@@ -757,6 +758,15 @@ def create_app(
                     f"{conv_stats.chars_saved:,} chars saved",
                     file=sys.stderr,
                 )
+
+        # --- Final sanitization (catch empty blocks from any upstream step) ---
+        messages = body.get("messages", [])
+        sanitize_fixes = sanitize_messages(messages)
+        if sanitize_fixes:
+            print(
+                f"  [{sid}] SANITIZE: fixed {sanitize_fixes} empty block(s)",
+                file=sys.stderr,
+            )
 
         # Forward to Anthropic — measure the final outgoing payload
         outgoing_bytes = len(json.dumps(body).encode("utf-8"))

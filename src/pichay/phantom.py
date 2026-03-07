@@ -155,7 +155,7 @@ class CleanupTagFilter:
         self._inside = False
         return pending
 
-PHANTOM_TOOL_NAMES = frozenset({"yuyay", "recall", "memory_fault", "qunqay"})
+PHANTOM_TOOL_NAMES = frozenset({"yuyay", "recall", "memory_fault", "qunqay", "tiqsiy"})
 
 PHANTOM_TOOL_DEFINITIONS = [
     {
@@ -219,6 +219,43 @@ PHANTOM_TOOL_DEFINITIONS = [
             "required": ["handles"],
         },
     },
+    {
+        "name": "tiqsiy",
+        "description": (
+            "Compact — structurally compress older conversation turns. "
+            "Replaces a range of older turns with a single user/assistant "
+            "summary pair you provide. Original turns are archived to "
+            "the backing store. Use this when conversation history is "
+            "consuming context but you've captured the important "
+            "conclusions. This reduces both content tokens and structural "
+            "overhead (role labels, turn boundaries). The compaction is "
+            "applied on the next turn."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "older_than": {
+                    "type": "integer",
+                    "description": (
+                        "Compact messages more than this many turns "
+                        "from the current turn. Messages newer than "
+                        "this are preserved."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "Your summary of the compacted conversation "
+                        "segment. Should capture conclusions, decisions, "
+                        "and any context needed for future reference. "
+                        "This becomes the content of the replacement "
+                        "assistant message."
+                    ),
+                },
+            },
+            "required": ["older_than", "summary"],
+        },
+    },
 ]
 
 
@@ -231,25 +268,26 @@ class PhantomCall:
     input: dict = field(default_factory=dict)
 
 
-def inject_tools(body: dict) -> bool:
+def inject_tools(body: dict) -> set[str]:
     """Add phantom tool definitions to the request's tools array.
 
-    Returns True (observe_only) if the framework already provides tools
-    with the same names — we observe phantom calls but don't strip them
-    from the SSE stream to avoid 400 "tool use concurrency" errors.
+    Returns a set of tool names that the framework already provides
+    (observe-only). Tools NOT in this set are fully intercepted by
+    the gateway — their events are suppressed from the stream and
+    handled via continuation.
 
-    Returns False when phantom tools are injected and should be
-    intercepted from the stream.
+    Returns empty set when no phantom tools are framework-provided
+    (all are intercepted).
     """
     tools = body.get("tools", [])
     existing_names = {t.get("name") for t in tools}
-    framework_provides = PHANTOM_TOOL_NAMES & existing_names
-    if framework_provides:
-        return True
+    observe_only = PHANTOM_TOOL_NAMES & existing_names
+    # Inject definitions for tools the framework doesn't provide
     for defn in PHANTOM_TOOL_DEFINITIONS:
-        tools.append(defn)
+        if defn["name"] not in existing_names:
+            tools.append(defn)
     body["tools"] = tools
-    return False
+    return observe_only
 
 
 def inject_phantom_results(

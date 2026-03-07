@@ -46,7 +46,8 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
             ops = parse_cleanup_tags(content)
             if not ops.empty:
                 total_ops.append(ops)
-                msg["content"] = strip_cleanup_tags(content)
+                stripped = strip_cleanup_tags(content)
+                msg["content"] = stripped if stripped else "[cleanup tags processed]"
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "text":
@@ -56,6 +57,15 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
                 if not ops.empty:
                     total_ops.append(ops)
                     block["text"] = strip_cleanup_tags(text)
+            # Remove empty text blocks left by tag stripping
+            msg["content"] = [
+                b for b in content
+                if not (isinstance(b, dict) and b.get("type") == "text"
+                        and not b.get("text", "").strip())
+            ]
+            # If all blocks were removed, keep a minimal valid one
+            if not msg["content"]:
+                msg["content"] = [{"type": "text", "text": "[cleanup tags processed]"}]
 
     if not total_ops:
         return None
@@ -269,6 +279,59 @@ def measure_messages(body: dict) -> dict:
                     )
 
     return metrics
+
+
+def sanitize_messages(messages: list[dict]) -> int:
+    """Remove empty content blocks that would cause API 400 errors.
+
+    The API rejects messages with empty text blocks, empty content
+    arrays, or empty string content. This runs as a final pass after
+    all message manipulation (cleanup tags, block status, phantom
+    tools) to catch any empties created upstream.
+
+    Modifies messages in-place. Returns count of fixes applied.
+    """
+    fixes = 0
+    for msg in messages:
+        content = msg.get("content")
+
+        if isinstance(content, str):
+            if not content.strip():
+                role = msg.get("role", "")
+                msg["content"] = (
+                    "[content removed]" if role == "assistant"
+                    else " "  # minimal valid user content
+                )
+                fixes += 1
+
+        elif isinstance(content, list):
+            # Remove empty text blocks
+            original_len = len(content)
+            content[:] = [
+                b for b in content
+                if not (
+                    isinstance(b, dict)
+                    and b.get("type") == "text"
+                    and not b.get("text", "").strip()
+                )
+            ]
+            fixes += original_len - len(content)
+
+            # If content list is now empty, add a minimal valid block
+            if not content:
+                role = msg.get("role", "")
+                content.append({
+                    "type": "text",
+                    "text": (
+                        "[content removed]" if role == "assistant"
+                        else " "
+                    ),
+                })
+                fixes += 1
+
+            msg["content"] = content
+
+    return fixes
 
 
 def strip_response_headers(raw_headers) -> dict:
