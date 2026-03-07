@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import socket
 import sys
 import time
@@ -736,10 +737,14 @@ def create_app(
                     file=sys.stderr,
                 )
 
-            # Conversation compression — model-authored summaries via Haiku.
-            # preserve_recent=12 keeps last 24 messages intact (was 6).
-            conv_stats = compact_conversation(messages, preserve_recent=12)
-            if conv_stats.messages_compressed > 0:
+            # Conversation compression — DISABLED by default.
+            # Third-party summarization loses model-relevant context;
+            # the model should manage its own memory via qunqay/compact.
+            # To re-enable, set PICHAY_CONV_COMPACT=1.
+            conv_stats = None
+            if os.environ.get("PICHAY_CONV_COMPACT") == "1":
+                conv_stats = compact_conversation(messages, preserve_recent=12)
+            if conv_stats and conv_stats.messages_compressed > 0:
                 log_record({
                     "type": "conversation_compaction",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
