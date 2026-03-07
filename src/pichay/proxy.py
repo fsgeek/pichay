@@ -237,10 +237,8 @@ def create_app(
         """Get or create per-conversation session state."""
         sid = _session_id(body)
         if sid not in _sessions:
-            ps = None
-            if compact:
-                page_log = log_dir / f"pages_{session_start}_{sid}.jsonl"
-                ps = PageStore(log_path=page_log)
+            page_log = log_dir / f"pages_{session_start}_{sid}.jsonl"
+            ps = PageStore(log_path=page_log)
             _sessions[sid] = {
                 "id": sid,
                 "token_state": {
@@ -407,8 +405,42 @@ def create_app(
         if request.query_string:
             query += "?" + request.query_string.decode("utf-8")
 
+        count_body_bytes = len(json.dumps(body).encode("utf-8"))
+        count_tools = len(body.get("tools", []))
+        count_messages = len(body.get("messages", []))
+
         try:
             resp = client.post(query, json=body, headers=headers)
+            # Parse and log the token count Anthropic returns
+            input_tokens = None
+            try:
+                count_data = json.loads(resp.content)
+                input_tokens = count_data.get("input_tokens")
+            except Exception:
+                pass
+            # Stash for comparison with outgoing /v1/messages
+            session["last_count"] = {
+                "input_tokens": input_tokens,
+                "body_bytes": count_body_bytes,
+                "tools": count_tools,
+                "messages": count_messages,
+            }
+            log_record({
+                "type": "count_tokens",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "session": sid,
+                "input_tokens": input_tokens,
+                "body_bytes": count_body_bytes,
+                "tools": count_tools,
+                "messages": count_messages,
+                "status_code": resp.status_code,
+            })
+            print(
+                f"  [{sid}] COUNT: {input_tokens} tokens"
+                f" ({count_body_bytes / 1024:.0f}KB,"
+                f" {count_messages} msgs, {count_tools} tools)",
+                file=sys.stderr,
+            )
             return (
                 resp.content,
                 resp.status_code,
@@ -524,12 +556,11 @@ def create_app(
                 file=sys.stderr,
             )
 
-        # --- System status injection ---
+        # --- System status injection (always active) ---
         # Give the model context pressure awareness and system identification.
         # Replaced each turn (not appended) so the model sees current state.
-        if compact:
-            inject_system_status(body, ts, token_cap, request_time,
-                                  block_store=session["block_store"])
+        inject_system_status(body, ts, token_cap, request_time,
+                              block_store=session.get("block_store"))
 
         # --- Block labeling (conversation memory management) ---
         bs = session["block_store"]
@@ -556,9 +587,9 @@ def create_app(
                     file=sys.stderr,
                 )
 
-        # --- Phantom tool handling (if compact mode) ---
+        # --- Phantom tool handling (always active) ---
         observe_only = session["observe_only"]
-        if compact and ps is not None:
+        if ps is not None:
             # Inject results for phantom calls from the previous turn
             pending = session["phantom_pending"]
             if pending:
@@ -713,7 +744,55 @@ def create_app(
                     file=sys.stderr,
                 )
 
-        # Forward to Anthropic
+        # Forward to Anthropic — measure the final outgoing payload
+        outgoing_bytes = len(json.dumps(body).encode("utf-8"))
+        outgoing_tools = len(body.get("tools", []))
+        outgoing_messages = len(body.get("messages", []))
+        log_record({
+            "type": "outgoing",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session": sid,
+            "turn": ts["turn"],
+            "outgoing_bytes": outgoing_bytes,
+            "outgoing_tools": outgoing_tools,
+            "outgoing_messages": outgoing_messages,
+            "max_tokens": body.get("max_tokens"),
+            "model": body.get("model", "unknown"),
+        })
+        # Compare with last count_tokens to detect divergence
+        last_count = session.get("last_count")
+        divergence_pct = None
+        if last_count and last_count["body_bytes"] > 0:
+            divergence_pct = (
+                (outgoing_bytes - last_count["body_bytes"])
+                / last_count["body_bytes"]
+                * 100
+            )
+
+        if divergence_pct is not None and divergence_pct > 10:
+            print(
+                f"{_RED}  [{sid}] DIVERGENCE WARNING: outgoing "
+                f"{outgoing_bytes / 1024:.0f}KB vs count_tokens "
+                f"{last_count['body_bytes'] / 1024:.0f}KB "
+                f"(+{divergence_pct:.0f}%) — gateway is injecting "
+                f"{(outgoing_bytes - last_count['body_bytes']) / 1024:.0f}KB"
+                f"{_RESET}",
+                file=sys.stderr,
+            )
+            print(
+                f"{_RED}  [{sid}]   count: {last_count['messages']} msgs, "
+                f"{last_count['tools']} tools → outgoing: "
+                f"{outgoing_messages} msgs, {outgoing_tools} tools"
+                f"{_RESET}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [{sid}] OUTGOING: {outgoing_bytes / 1024:.0f}KB"
+                f" ({outgoing_messages} msgs, {outgoing_tools} tools)",
+                file=sys.stderr,
+            )
+
         headers = dict(request.headers)
         for h in ["Host", "Content-Length", "Transfer-Encoding"]:
             headers.pop(h, None)
@@ -790,6 +869,30 @@ def create_app(
                 ),
                 stream=True,
             )
+            # Log non-200 responses immediately (error bodies are not SSE)
+            if resp.status_code != 200:
+                error_body = resp.read().decode("utf-8", errors="replace")
+                log_record({
+                    "type": "api_error",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "session": sid,
+                    "status_code": resp.status_code,
+                    "error_body": error_body[:2000],
+                })
+                print(
+                    f"  [{sid}] API ERROR {resp.status_code}: "
+                    f"{error_body[:200]}",
+                    file=sys.stderr,
+                )
+                resp.close()
+                return Response(
+                    error_body,
+                    status=resp.status_code,
+                    headers=strip_response_headers(resp.headers),
+                    content_type=resp.headers.get(
+                        "content-type", "application/json"
+                    ),
+                )
             response_headers = strip_response_headers(resp.headers)
 
             def generate():
@@ -798,27 +901,20 @@ def create_app(
                 phantom_calls: list[PhantomCall] = []
                 continuation_needed: list[bool] = []
                 try:
-                    if compact:
-                        # Filter phantom tool events from the stream
-                        for chunk in filtered_stream(
-                            resp.iter_bytes(),
-                            chunks_collected,
-                            phantom_calls,
-                            observe_only=observe_only,
-                            block_store=session["block_store"],
-                            page_store=session.get("page_store"),
-                            session_id=sid,
-                            continuation_needed=continuation_needed,
-                        ):
-                            if first_byte_time is None:
-                                first_byte_time = datetime.now(timezone.utc)
-                            yield chunk
-                    else:
-                        for chunk in resp.iter_bytes():
-                            if first_byte_time is None:
-                                first_byte_time = datetime.now(timezone.utc)
-                            chunks_collected.append(chunk)
-                            yield chunk
+                    # Always filter stream for phantom tool calls
+                    for chunk in filtered_stream(
+                        resp.iter_bytes(),
+                        chunks_collected,
+                        phantom_calls,
+                        observe_only=observe_only,
+                        block_store=session["block_store"],
+                        page_store=session.get("page_store"),
+                        session_id=sid,
+                        continuation_needed=continuation_needed,
+                    ):
+                        if first_byte_time is None:
+                            first_byte_time = datetime.now(timezone.utc)
+                        yield chunk
                 finally:
                     resp.close()
                     response_time = datetime.now(timezone.utc)
@@ -939,13 +1035,12 @@ def create_app(
             "log_file": str(log_file),
             "active_sessions": len(_sessions),
         }
-        if compact:
-            result["sessions"] = {}
-            for sid, s in _sessions.items():
-                sess_info = s["page_store"].summary() if s["page_store"] else {}
-                if s.get("block_store"):
-                    sess_info["blocks"] = s["block_store"].summary()
-                result["sessions"][sid] = sess_info
+        result["sessions"] = {}
+        for sid, s in _sessions.items():
+            sess_info = s["page_store"].summary() if s["page_store"] else {}
+            if s.get("block_store"):
+                sess_info["blocks"] = s["block_store"].summary()
+            result["sessions"][sid] = sess_info
         if trim and trimmer is not None:
             result["trimmer"] = trimmer.summary()
         return result

@@ -290,7 +290,13 @@ def inject_phantom_results(
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
 
+    existing_tool_ids = {
+        b.get("id") for b in content
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    }
     for call in phantom_calls:
+        if call.tool_use_id in existing_tool_ids:
+            continue  # already present — don't duplicate
         content.append(
             {
                 "type": "tool_use",
@@ -317,12 +323,18 @@ def inject_phantom_results(
     # The next user message (if any) should contain the results
     inject_idx = last_assistant_idx + 1
     if inject_idx < len(messages) and messages[inject_idx].get("role") == "user":
-        # Append to existing user message
+        # Append to existing user message, skipping duplicates
         user_msg = messages[inject_idx]
         user_content = user_msg.get("content", [])
         if isinstance(user_content, str):
             user_content = [{"type": "text", "text": user_content}]
-        user_content.extend(results)
+        existing_result_ids = {
+            b.get("tool_use_id") for b in user_content
+            if isinstance(b, dict) and b.get("type") == "tool_result"
+        }
+        for r in results:
+            if r["tool_use_id"] not in existing_result_ids:
+                user_content.append(r)
         user_msg["content"] = user_content
     else:
         # Insert a new user message with the results
