@@ -294,7 +294,7 @@ def inject_phantom_results(
     messages: list[dict],
     phantom_calls: list[PhantomCall],
     page_store,
-    observe_only: bool = False,
+    observe_only: bool | set[str] = False,
 ) -> list[dict]:
     """Inject tool_result messages for phantom calls from the previous turn.
 
@@ -304,13 +304,24 @@ def inject_phantom_results(
 
     For memory_fault calls, the result includes the restored content.
 
-    When observe_only is True, the framework already handled these tools,
-    so we skip message injection entirely.
+    observe_only can be:
+    - True: skip all injection (framework handled everything)
+    - False: inject all (gateway intercepted everything)
+    - set[str]: skip injection for tools in set (framework handled
+      those); inject for tools NOT in set (gateway intercepted those)
     """
     if not phantom_calls:
         return messages
-    if observe_only:
+    if observe_only is True:
         return messages
+
+    # Filter to only intercepted calls (not framework-handled)
+    if isinstance(observe_only, set) and observe_only:
+        phantom_calls = [
+            c for c in phantom_calls if c.name not in observe_only
+        ]
+        if not phantom_calls:
+            return messages
 
     # Find the last assistant message — that's where the phantom calls were
     last_assistant_idx = None
@@ -471,14 +482,149 @@ def _handle_phantom_call(call: PhantomCall, page_store,
             )
         return "\n\n".join(parts) if parts else "No handles requested."
 
+    if call.name == "tiqsiy":
+        # Structural compaction is deferred — we store the request
+        # in the session and apply it on the next inbound request.
+        # The handler in proxy.py reads pending_compaction from session.
+        older_than = call.input.get("older_than", 20)
+        summary = call.input.get("summary", "")
+        if not summary:
+            return "Error: summary is required for compaction."
+        # Return confirmation — actual compaction happens next turn.
+        return (
+            f"Compaction scheduled: messages older than {older_than} turns "
+            f"will be replaced with your summary on the next turn. "
+            f"Summary length: {len(summary)} chars."
+        )
+
     return f"Unknown phantom tool: {call.name}"
+
+
+@dataclass
+class CompactionResult:
+    """Result of a structural compaction operation."""
+
+    messages_removed: int = 0
+    messages_after: int = 0
+    chars_removed: int = 0
+    archived: list[dict] = field(default_factory=list)
+
+
+def apply_compaction(
+    messages: list[dict],
+    older_than: int,
+    summary: str,
+) -> CompactionResult:
+    """Replace older conversation turns with a summary pair.
+
+    Finds messages older than `older_than` turns from the end,
+    replaces them with a single user/assistant summary pair.
+    Returns the archived messages for storage.
+
+    Preserves the first message (often contains system context
+    from the framework) and maintains valid alternating structure.
+    """
+    result = CompactionResult()
+    total = len(messages)
+
+    if total < 4:  # need at least 2 turns to compact
+        return result
+
+    # Count turns (pairs of user/assistant messages)
+    # Each turn is roughly 2 messages
+    preserve_count = older_than * 2
+    if preserve_count >= total:
+        return result  # nothing old enough to compact
+
+    # Split: archive the old, keep the recent
+    # Always preserve the first message (framework context)
+    compact_end = total - preserve_count
+    if compact_end <= 1:
+        return result
+
+    archived = messages[1:compact_end]  # skip first message
+    preserved_first = messages[0]
+    preserved_recent = messages[compact_end:]
+
+    # Calculate what we're removing
+    archived_chars = sum(
+        len(json.dumps(m).encode("utf-8")) for m in archived
+    )
+
+    # Build the summary pair — a single user/assistant exchange
+    # that replaces the archived conversation segment
+    summary_pair = [
+        {
+            "role": "user",
+            "content": (
+                f"[Compacted: {len(archived)} messages from earlier "
+                f"in this conversation were structurally compressed "
+                f"into this summary by the model.]"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": summary,
+        },
+    ]
+
+    # Ensure valid alternation after first message
+    # The first preserved message sets the expected next role
+    new_messages = [preserved_first] + summary_pair + preserved_recent
+
+    # Validate alternation — fix if needed
+    _fix_alternation(new_messages)
+
+    result.messages_removed = len(archived)
+    result.messages_after = len(new_messages)
+    result.chars_removed = archived_chars
+    result.archived = archived
+
+    # Replace in-place
+    messages.clear()
+    messages.extend(new_messages)
+
+    return result
+
+
+def _fix_alternation(messages: list[dict]) -> None:
+    """Ensure strict user/assistant alternation.
+
+    If two consecutive messages have the same role, merge the
+    second into the first.
+    """
+    i = 1
+    while i < len(messages):
+        if messages[i].get("role") == messages[i - 1].get("role"):
+            # Merge: append content of messages[i] to messages[i-1]
+            prev = messages[i - 1]
+            curr = messages[i]
+            prev_content = prev.get("content", "")
+            curr_content = curr.get("content", "")
+            if isinstance(prev_content, str) and isinstance(curr_content, str):
+                prev["content"] = prev_content + "\n\n" + curr_content
+            elif isinstance(prev_content, list) and isinstance(curr_content, list):
+                prev["content"] = prev_content + curr_content
+            elif isinstance(prev_content, str):
+                prev["content"] = [
+                    {"type": "text", "text": prev_content}
+                ] + (curr_content if isinstance(curr_content, list) else [
+                    {"type": "text", "text": str(curr_content)}
+                ])
+            else:
+                prev["content"] = prev_content + [
+                    {"type": "text", "text": str(curr_content)}
+                ]
+            messages.pop(i)
+        else:
+            i += 1
 
 
 def filtered_stream(
     byte_iter,
     collected_chunks,
     phantom_calls_out,
-    observe_only: bool = False,
+    observe_only: bool | set[str] = False,
     block_store=None,
     page_store=None,
     session_id: str = "",
@@ -494,13 +640,25 @@ def filtered_stream(
     is rewritten from "tool_use" to "end_turn" so the framework doesn't
     enter tool execution mode for tools it never saw.
 
-    When observe_only is True, phantom events are captured but not
-    suppressed from the stream.
+    observe_only can be:
+    - False: all phantom tools are intercepted (suppress from stream)
+    - True: all phantom tools are observed only (legacy compat)
+    - set[str]: tools in the set are observed; others are intercepted
 
     collected_chunks receives ALL bytes (including phantom) for logging.
     """
+    # Normalize observe_only to a set of tool names
+    if observe_only is True:
+        _observe_set = PHANTOM_TOOL_NAMES  # all are observe-only
+    elif observe_only is False:
+        _observe_set: set[str] = set()  # none are observe-only
+    else:
+        _observe_set = observe_only  # per-tool set
+
     phantom_block_indices: set[int] = set()
     real_tool_indices: set[int] = set()
+    # Track which phantom blocks are intercept-only (not observe-only)
+    intercept_block_indices: set[int] = set()
     phantom_building: dict[int, dict] = {}
     cleanup_filter = CleanupTagFilter(block_store=block_store, page_store=page_store)
     if continuation_needed is None:
@@ -535,8 +693,9 @@ def filtered_stream(
                     # Strip cleanup tags from text_delta events before
                     # the framework sees them. Tags can span chunks so
                     # CleanupTagFilter maintains state across events.
+                    # Only strip if we have any intercept-mode tools active.
                     if (
-                        not observe_only
+                        _observe_set != PHANTOM_TOOL_NAMES
                         and event_data.get("type") == "content_block_delta"
                     ):
                         delta = event_data.get("delta", {})
@@ -555,16 +714,18 @@ def filtered_stream(
                         real_tool_indices,
                         phantom_building,
                         phantom_calls_out,
+                        intercept_indices=intercept_block_indices,
+                        observe_set=_observe_set,
                     )
-                    # When all content blocks were phantom, the gateway
-                    # needs to auto-continue: execute the phantom tool and
-                    # send the result back for the model to continue.
-                    # Suppress stop events so the caller can do continuation.
+                    # When all content blocks were intercepted phantom
+                    # tools (no real tools, no observe-only phantom tools),
+                    # the gateway needs to auto-continue.
                     if (
-                        not observe_only
+                        intercept_block_indices
                         and event_data.get("type") == "message_delta"
-                        and phantom_block_indices
                         and not real_tool_indices
+                        # Only continue if ALL phantom blocks are intercepted
+                        and phantom_block_indices == intercept_block_indices
                     ):
                         delta = event_data.get("delta", {})
                         if delta.get("stop_reason") == "tool_use":
@@ -589,7 +750,7 @@ def filtered_stream(
                 except json.JSONDecodeError:
                     pass
 
-            if not suppress or observe_only:
+            if not suppress:
                 yield event_bytes + b"\n\n"
 
     # Flush remaining buffer
@@ -612,22 +773,38 @@ def _classify_event(
     real_tool_indices: set[int],
     building: dict[int, dict],
     completed: list[PhantomCall],
+    intercept_indices: set[int] | None = None,
+    observe_set: set[str] | None = None,
 ) -> bool:
-    """Returns True if this event should be suppressed."""
+    """Returns True if this event should be suppressed.
+
+    When observe_set is provided, only tools NOT in the set are
+    suppressed (intercept mode). Tools in the set are captured
+    but not suppressed (observe mode).
+    """
+    if intercept_indices is None:
+        intercept_indices = set()
+    if observe_set is None:
+        observe_set = set()
+
     event_type = event_data.get("type", "")
     index = event_data.get("index")
 
     if event_type == "content_block_start":
         cb = event_data.get("content_block", {})
         if cb.get("type") == "tool_use":
-            if cb.get("name") in PHANTOM_TOOL_NAMES:
+            tool_name = cb.get("name", "")
+            if tool_name in PHANTOM_TOOL_NAMES:
                 phantom_indices.add(index)
                 building[index] = {
-                    "name": cb["name"],
+                    "name": tool_name,
                     "id": cb.get("id", ""),
                     "input_json": "",
                 }
-                return True
+                if tool_name not in observe_set:
+                    intercept_indices.add(index)
+                    return True  # suppress — we're intercepting
+                return False  # observe — let it through
             else:
                 # Real tool — track so we know stop_reason is legitimate
                 real_tool_indices.add(index)
@@ -636,7 +813,7 @@ def _classify_event(
         delta = event_data.get("delta", {})
         if delta.get("type") == "input_json_delta":
             building[index]["input_json"] += delta.get("partial_json", "")
-        return True
+        return index in intercept_indices
 
     elif event_type == "content_block_stop" and index in phantom_indices:
         if index in building:
@@ -652,6 +829,6 @@ def _classify_event(
                     input=parsed_input,
                 )
             )
-        return True
+        return index in intercept_indices
 
     return False

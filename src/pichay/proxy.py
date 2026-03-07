@@ -54,6 +54,7 @@ from pichay.message_ops import (
 from pichay.phantom import (
     PhantomCall,
     _handle_phantom_call,
+    apply_compaction,
     filtered_stream,
     inject_phantom_results,
     inject_tools,
@@ -261,7 +262,8 @@ def create_app(
                 "page_store": ps,
                 "block_store": BlockStore(),
                 "phantom_pending": [],
-                "observe_only": False,
+                "observe_only": set(),
+                "pending_compaction": None,
             }
             print(
                 f"  {_DIM}[{sid}] new session{_RESET}",
@@ -638,6 +640,34 @@ def create_app(
             observe_only = inject_tools(body)
             session["observe_only"] = observe_only
 
+        # --- Deferred structural compaction (tiqsiy) ---
+        pending_compact = session.get("pending_compaction")
+        if pending_compact is not None:
+            messages = body.get("messages", [])
+            cr = apply_compaction(
+                messages,
+                older_than=pending_compact["older_than"],
+                summary=pending_compact["summary"],
+            )
+            session["pending_compaction"] = None
+            if cr.messages_removed > 0:
+                print(
+                    f"  [{sid}] COMPACT: {cr.messages_removed} messages → "
+                    f"summary pair, {cr.chars_removed:,} chars archived, "
+                    f"{cr.messages_after} messages remain",
+                    file=sys.stderr,
+                )
+                log_record({
+                    "type": "structural_compaction",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "session": sid,
+                    "messages_removed": cr.messages_removed,
+                    "messages_after": cr.messages_after,
+                    "chars_removed": cr.chars_removed,
+                    "older_than": pending_compact["older_than"],
+                    "summary_length": len(pending_compact["summary"]),
+                })
+
         # --- Context paging (if enabled) ---
         if compact and ps is not None:
             messages = body.get("messages", [])
@@ -951,19 +981,36 @@ def create_app(
                         for pc in phantom_calls:
                             _handle_phantom_call(pc, ps,
                                                 block_store=session.get("block_store"))
+                            is_observed = (
+                                isinstance(observe_only, set)
+                                and pc.name in observe_only
+                            )
                             print(
-                                f"  [{sid}] PHANTOM{'(observe)' if observe_only else ''}: "
+                                f"  [{sid}] PHANTOM"
+                                f"{'(observe)' if is_observed else ''}: "
                                 f"{pc.name}({pc.input})",
                                 file=sys.stderr,
                             )
+                            # Store tiqsiy compaction for deferred execution
+                            if pc.name == "tiqsiy":
+                                session["pending_compaction"] = {
+                                    "older_than": pc.input.get("older_than", 20),
+                                    "summary": pc.input.get("summary", ""),
+                                }
 
                     # Auto-continue: if filtered_stream suppressed the stop
                     # events, we need to execute phantom tools and send the
                     # results back so the model can continue generating.
-                    if continuation_needed and phantom_calls and not observe_only:
+                    # Only continue for intercepted calls (not observe-only).
+                    intercepted = [
+                        pc for pc in phantom_calls
+                        if not (isinstance(observe_only, set)
+                                and pc.name in observe_only)
+                    ]
+                    if continuation_needed and intercepted:
                         try:
                             yield from _phantom_continuation(
-                                body, phantom_calls, ps,
+                                body, intercepted, ps,
                                 session.get("block_store"),
                                 headers, upstream_path, client,
                                 chunks_collected, sid,
