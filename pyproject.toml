@@ -9,6 +9,9 @@ dependencies = [
     "flask>=3.0",
     "matplotlib>=3.10.8",
     "anthropic>=0.84.0",
+    "numpy>=2.4.2",
+    "dask>=2026.1.2",
+    "polars>=1.38.1",
 ]
 
 [project.optional-dependencies]
