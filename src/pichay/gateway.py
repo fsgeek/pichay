@@ -373,7 +373,15 @@ class Session:
         self.page_store = PageStore(
             log_path=log_dir / f"pages_{sid}.jsonl",
         )
-        self.block_store = BlockStore()
+        self._block_checkpoint = log_dir / f"blocks_{sid}.json"
+        if self._block_checkpoint.is_file():
+            self.block_store = BlockStore.from_checkpoint(self._block_checkpoint)
+            print(
+                f"  {_DIM}[{sid}] restored {self.block_store.block_count} blocks{_RESET}",
+                file=sys.stderr,
+            )
+        else:
+            self.block_store = BlockStore()
 
     def track_usage(self, usage: dict) -> None:
         """Update token state from API response usage."""
@@ -642,6 +650,12 @@ def create_app(
             if cleanup_stats:
                 print(
                     f"  {_DIM}[{session.id}] cleanup: {cleanup_stats}{_RESET}",
+                    file=sys.stderr,
+                )
+                # Checkpoint block state after cleanup mutations
+                saved = session.block_store.checkpoint(session._block_checkpoint)
+                print(
+                    f"  {_DIM}[{session.id}] checkpointed {saved} blocks{_RESET}",
                     file=sys.stderr,
                 )
 

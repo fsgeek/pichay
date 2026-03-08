@@ -120,6 +120,15 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
             for path in ops.releases:
                 ps.mark_released(path)
             stats_parts.append(f"released {len(ops.releases)} path(s)")
+        for collapse in ops.collapses:
+            collapsed = bs.collapse_range(
+                collapse.start_turn, collapse.end_turn, collapse.summary
+            )
+            if collapsed:
+                stats_parts.append(
+                    f"collapsed turns {collapse.start_turn}-{collapse.end_turn} "
+                    f"({len(collapsed)} blocks)"
+                )
 
     return "; ".join(stats_parts) if stats_parts else None
 

@@ -11,8 +11,10 @@ Phase 2: cleanup — drop, summarize, anchor blocks via inline tags.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -179,6 +181,54 @@ class BlockStore:
         entry.status = "anchored"
         return True
 
+    def collapse_range(self, start_turn: int, end_turn: int,
+                       summary: str) -> list[str]:
+        """Replace all blocks in a turn range with a summary marker.
+
+        Marks all resident/anchored blocks in [start_turn, end_turn] as
+        dropped, then creates a synthetic summary block covering the range.
+        Returns list of block IDs that were collapsed.
+
+        The synthetic block gets a deterministic ID from the range + summary
+        so repeated collapse of the same range is idempotent.
+        """
+        collapsed_ids = []
+        for entry in self._by_id.values():
+            if (start_turn <= entry.turn <= end_turn
+                    and entry.status in ("resident", "anchored")):
+                entry.status = "dropped"
+                collapsed_ids.append(entry.block_id)
+
+        if not collapsed_ids:
+            return []
+
+        # Create a synthetic summary block for the range
+        synthetic_content = (
+            f"[Turns {start_turn}-{end_turn} collapsed: {summary}]"
+        )
+        content_hash = hashlib.sha256(synthetic_content.encode()).hexdigest()
+        short_id = content_hash[:8]
+
+        # Avoid collision with existing blocks
+        if short_id in self._by_id:
+            short_id = content_hash[:12]
+
+        if short_id not in self._by_id:
+            entry = BlockEntry(
+                block_id=short_id,
+                content_hash=content_hash,
+                size=len(synthetic_content.encode()),
+                turn=start_turn,
+                role="assistant",
+                preview=synthetic_content[:80],
+                status="summarized",
+                summary=summary,
+            )
+            self._by_id[short_id] = entry
+            self._by_hash[content_hash] = short_id
+
+        return collapsed_ids
+
     _BLOCK_LABEL_RE = re.compile(r"^\[(?:tensor|block):([a-f0-9]{8,12})(?:\s*\([^)]*\))?\]\n?")
 
     def apply_to_messages(self, messages: list[dict]) -> dict:
@@ -262,3 +312,66 @@ class BlockStore:
             "total_bytes": self.total_bytes,
             "by_status": by_status,
         }
+
+    # --- Checkpoint / Restart ---
+
+    def checkpoint(self, path: Path) -> int:
+        """Serialize block state to JSON. Returns count of entries saved.
+
+        Writes atomically (tmp + rename) so a crash mid-write can't
+        corrupt the checkpoint. Only saves metadata and summaries —
+        original_content is NOT checkpointed (too large, and the
+        messages array is the source of truth for content).
+        """
+        entries = []
+        for entry in self._by_id.values():
+            entries.append({
+                "block_id": entry.block_id,
+                "content_hash": entry.content_hash,
+                "size": entry.size,
+                "turn": entry.turn,
+                "role": entry.role,
+                "preview": entry.preview,
+                "status": entry.status,
+                "summary": entry.summary,
+            })
+
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(entries, indent=2))
+        tmp.rename(path)
+        return len(entries)
+
+    @classmethod
+    def from_checkpoint(cls, path: Path) -> "BlockStore":
+        """Restore a BlockStore from a checkpoint file.
+
+        Returns a new BlockStore with all tracked entries restored.
+        Blocks that were resident at checkpoint time stay resident
+        but without original_content (will be re-populated when
+        label_messages sees the same content again).
+        """
+        store = cls()
+        if not path.is_file():
+            return store
+
+        try:
+            entries = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return store
+
+        for rec in entries:
+            entry = BlockEntry(
+                block_id=rec["block_id"],
+                content_hash=rec["content_hash"],
+                size=rec["size"],
+                turn=rec["turn"],
+                role=rec["role"],
+                preview=rec["preview"],
+                status=rec.get("status", "resident"),
+                summary=rec.get("summary"),
+                original_content=None,
+            )
+            store._by_id[entry.block_id] = entry
+            store._by_hash[entry.content_hash] = entry.block_id
+
+        return store
