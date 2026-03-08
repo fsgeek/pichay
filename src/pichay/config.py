@@ -36,17 +36,20 @@ class PagingPolicy:
     window_size: int = 200_000
 
     # Below this: no eviction, let context grow freely
-    floor_tokens: int = 60_000
+    # Always send compact memory stats (fill %, tokens, block count)
+    floor_tokens: int = 0
 
-    # Above this: advisory — inform model, suggest curation
-    # 60k gives ~40k tokens of runway before involuntary at 100k
-    advisory_tokens: int = 60_000
+    # Above this: advisory — inform model of largest blocks + cleanup ops
+    # 50% of window gives ~50% runway before involuntary
+    advisory_tokens: int = 100_000
 
     # Above this: involuntary eviction by age/size policy
-    involuntary_tokens: int = 100_000
+    # 70% of window — act now or the system will
+    involuntary_tokens: int = 140_000
 
     # Above this: aggressive eviction, survival requires pins
-    hard_cap_tokens: int = 120_000
+    # 85% of window — last resort before context death
+    hard_cap_tokens: int = 170_000
 
     # Eviction parameters
     age_threshold: int = 4       # evict tool results older than N turns
@@ -136,19 +139,19 @@ def add_policy_args(parser) -> None:
     )
     group.add_argument(
         "--floor-tokens", type=int, default=None,
-        help="Below this: no eviction (default: 60000)",
+        help="Below this: no eviction (default: 0, always send stats)",
     )
     group.add_argument(
         "--advisory-tokens", type=int, default=None,
-        help="Above this: suggest curation to model (default: 80000)",
+        help="Above this: suggest curation to model (default: 100000, 50%%)",
     )
     group.add_argument(
         "--involuntary-tokens", type=int, default=None,
-        help="Above this: auto-evict by policy (default: 100000)",
+        help="Above this: auto-evict by policy (default: 140000, 70%%)",
     )
     group.add_argument(
         "--hard-cap-tokens", type=int, default=None,
-        help="Above this: aggressive eviction (default: 120000)",
+        help="Above this: aggressive eviction (default: 170000, 85%%)",
     )
     group.add_argument(
         "--age-threshold", type=int, default=None,
