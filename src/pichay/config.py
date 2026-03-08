@@ -39,7 +39,8 @@ class PagingPolicy:
     floor_tokens: int = 60_000
 
     # Above this: advisory — inform model, suggest curation
-    advisory_tokens: int = 80_000
+    # 60k gives ~40k tokens of runway before involuntary at 100k
+    advisory_tokens: int = 60_000
 
     # Above this: involuntary eviction by age/size policy
     involuntary_tokens: int = 100_000
