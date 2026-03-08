@@ -12,25 +12,23 @@
     legend style={font=\small},
     grid=major,
     grid style={gray!20},
-    scaled y ticks=false,
     y tick label style={/pgf/number format/fixed,
                         /pgf/number format/precision=1},
-    yticklabel={\pgfmathparse{\tick/1000000}\pgfmathprintnumber{\pgfmathresult}},
 ]
 
 % Baseline: cumulative tokens without eviction
 \addplot[thick, red!70!black, mark=none, name path=baseline] coordinates {
-    (0, 13651) (10, 352856) (20, 1037825) (30, 1850237)
-    (40, 2884656) (50, 3989325) (60, 5146048) (70, 6379942)
-    (80, 7689415) (87, 8645027)
+    (0, 0.013651) (10, 0.352856) (20, 1.037825) (30, 1.850237)
+    (40, 2.884656) (50, 3.989325) (60, 5.146048) (70, 6.379942)
+    (80, 7.689415) (87, 8.645027)
 };
 \addlegendentry{Baseline (full context)}
 
 % Managed: cumulative tokens with Pichay eviction
 \addplot[thick, blue!70!black, mark=none, dashed, name path=managed] coordinates {
-    (0, 7508) (10, 194065) (20, 570793) (30, 1017614)
-    (40, 1586539) (50, 2194101) (60, 2830295) (70, 3508933)
-    (80, 4229138) (87, 4754720)
+    (0, 0.007508) (10, 0.194065) (20, 0.570793) (30, 1.017614)
+    (40, 1.586539) (50, 2.194101) (60, 2.830295) (70, 3.508933)
+    (80, 4.229138) (87, 4.754720)
 };
 \addlegendentry{Managed (Pichay)}
 

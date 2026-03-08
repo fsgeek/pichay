@@ -1,89 +1,83 @@
 % Atlas — first demand paging system
-@article{kilburn1962one,
-  author    = {T. Kilburn and D. B. G. Edwards and M. J. Lanigan and F. H. Sumner},
-  title     = {One-Level Storage System},
-  journal   = {{IRE} Transactions on Electronic Computers},
-  volume    = {EC-11},
-  number    = {2},
-  pages     = {223--235},
-  year      = {1962},
-  doi       = {10.1109/TEC.1962.5219356},
+@inproceedings{kilburn1962one,
+  title={One-level storage system},
+  author={Kilbum, T and Edwards, DBG and Lanigan, MJ and Sumner, FH},
+  booktitle={IRE Transactions, EC-Denning, Peter J.“On Modeling Program Behavior,” Arlington, VA: AFIPS Press: Proceedings, Spring Joint Computer Conference},
+  volume={40},
+  pages={937--944}
 }
 
 % Belady's MIN — optimal page replacement
 @article{belady1966study,
-  author    = {L. A. Belady},
-  title     = {A Study of Replacement Algorithms for a Virtual-Storage Computer},
-  journal   = {{IBM} Systems Journal},
-  volume    = {5},
-  number    = {2},
-  pages     = {78--101},
-  year      = {1966},
-  doi       = {10.1147/sj.52.0078},
+  title={A study of replacement algorithms for a virtual-storage computer},
+  author={Belady, Laszlo A.},
+  journal={IBM Systems journal},
+  volume={5},
+  number={2},
+  pages={78--101},
+  year={1966},
+  publisher={IBM}
 }
 
 % Foundational virtual memory
 @article{denning1968working,
-  author    = {Peter J. Denning},
-  title     = {The Working Set Model for Program Behavior},
-  journal   = {Communications of the ACM},
-  volume    = {11},
-  number    = {5},
-  pages     = {323--333},
-  year      = {1968},
-  doi       = {10.1145/363095.363141},
+  title={The working set model for program behavior},
+  author={Denning, Peter J},
+  journal={Communications of the ACM},
+  volume={11},
+  number={5},
+  pages={323--333},
+  year={1968},
+  publisher={ACM New York, NY, USA}
 }
 
 @article{denning1970virtual,
-  author    = {Peter J. Denning},
-  title     = {Virtual Memory},
-  journal   = {ACM Computing Surveys},
-  volume    = {2},
-  number    = {3},
-  pages     = {153--189},
-  year      = {1970},
-  doi       = {10.1145/356571.356573},
-}
-
-% Context compression
-@inproceedings{jiang2023llmlingua,
-  author    = {Huiqiang Jiang and Qianhui Wu and Chin-Yew Lin and Yuqing Yang and Lili Qiu},
-  title     = {{LLMLingua}: Compressing Prompts for Accelerated Inference of Large Language Models},
-  booktitle = {Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
-  year      = {2023},
+  title={Virtual memory},
+  author={Denning, Peter J},
+  journal={ACM Computing Surveys (CSUR)},
+  volume={2},
+  number={3},
+  pages={153--189},
+  year={1970},
+  publisher={ACM New York, NY, USA}
 }
 
 @inproceedings{jiang2024longllmlingua,
-  author    = {Huiqiang Jiang and Qianhui Wu and Xufang Luo and Dongsheng Li and Chin-Yew Lin and Yuqing Yang and Lili Qiu},
-  title     = {{LongLLMLingua}: Accelerating and Enhancing {LLMs} in Long Context Scenarios via Prompt Compression},
-  booktitle = {Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
-  pages     = {1658--1677},
-  year      = {2024},
-  address   = {Bangkok, Thailand},
-  publisher = {Association for Computational Linguistics},
+  title={Longllmlingua: Accelerating and enhancing llms in long context scenarios via prompt compression},
+  author={Jiang, Huiqiang and Wu, Qianhui and Luo, Xufang and Li, Dongsheng and Lin, Chin-Yew and Yang, Yuqing and Qiu, Lili},
+  booktitle={Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
+  pages={1658--1677},
+  year={2024}
 }
-
 % Agent context pruning
-@article{wang2026swepruner,
-  author    = {Yuhang Wang and Yuling Shi and Mo Yang and Rongrui Zhang and Shilin He and Heng Lian and Yuting Chen and Siyu Ye and Kai Cai and Xiaodong Gu},
-  title     = {{SWE-Pruner}: Self-Adaptive Context Pruning for Coding Agents},
-  journal   = {arXiv preprint arXiv:2601.16746},
-  year      = {2026},
+@misc{wang2026swepruner,
+  title={SWE-Pruner: Self-Adaptive Context Pruning for Coding Agents},
+  author={Yuhang Wang and Yuling Shi and Mo Yang and Rongrui Zhang and Shilin He and Heng Lian and Yuting Chen and Siyu Ye and Kai Cai and Xiaodong Gu},
+  year={2026},
+  eprint={2601.16746},
+  archivePrefix={arXiv},
+  primaryClass={cs.SE},
+  url={https://arxiv.org/abs/2601.16746},
 }
 
-@inproceedings{lindenbauer2025complexity,
-  author    = {Tobias Lindenbauer and Igor Slinko and Ludwig Felder and Egor Bogomolov and Yaroslav Zharov},
-  title     = {The Complexity Trap: Simple Observation Masking Is as Efficient as {LLM} Summarization for Agent Context Management},
-  booktitle = {4th Deep Learning for Code Workshop (DL4C) at NeurIPS 2025},
-  year      = {2025},
-  note      = {arXiv:2508.21433},
+@misc{lindenbauer2025complexity,
+  title={The Complexity Trap: Simple Observation Masking Is as Efficient as LLM Summarization for Agent Context Management},
+  author={Tobias Lindenbauer and Igor Slinko and Ludwig Felder and Egor Bogomolov and Yaroslav Zharov},
+  year={2025},
+  eprint={2508.21433},
+  archivePrefix={arXiv},
+  primaryClass={cs.SE},
+  url={https://arxiv.org/abs/2508.21433},
 }
 
-@article{kang2025acon,
-  author    = {Minki Kang and Wei-Ning Chen and Dongge Han and Huseyin A. Inan and Lukas Wutschitz and Yanzhi Chen and Robert Sim and Saravan Rajmohan},
-  title     = {{ACON}: Optimizing Context Compression for Long-horizon {LLM} Agents},
-  journal   = {arXiv preprint arXiv:2510.00615},
-  year      = {2025},
+@misc{kang2025acon,
+  title={ACON: Optimizing Context Compression for Long-horizon LLM Agents},
+  author={Minki Kang and Wei-Ning Chen and Dongge Han and Huseyin A. Inan and Lukas Wutschitz and Yanzhi Chen and Robert Sim and Saravan Rajmohan},
+  year={2025},
+  eprint={2510.00615},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  url={https://arxiv.org/abs/2510.00615},
 }
 
 % Quadratic cost analysis
@@ -128,9 +122,56 @@
   note         = {Accessed March 2026},
 }
 
-@article{mei2025survey,
-  author    = {Lingrui Mei and Jiayu Yao and Yuyao Ge and Yiwei Wang and Baolong Bi and Yujun Cai and Jiazhi Liu and Mingyu Li and Zhong-Zhi Li and Duzhen Zhang and Chenlin Zhou and Jiayi Mao and Tianze Xia and Jiafeng Guo and Shenghua Liu},
-  title     = {A Survey of Context Engineering for Large Language Models},
-  journal   = {arXiv preprint arXiv:2507.13334},
-  year      = {2025},
+@misc{mei2025survey,
+     title={A Survey of Context Engineering for Large Language Models},
+      author={Lingrui Mei and Jiayu Yao and Yuyao Ge and Yiwei Wang and Baolong Bi and Yujun Cai and Jiazhi Liu and Mingyu Li and Zhong-Zhi Li and Duzhen Zhang and Chenlin Zhou and Jiayi Mao and Tianze Xia and Jiafeng Guo and Shenghua Liu},
+      year={2025},
+      eprint={2507.13334},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2507.13334},
+}
+
+% MemGPT — OS virtual memory analogy for LLM context
+@misc{packer2023memgpt,
+      title={MemGPT: Towards LLMs as Operating Systems},
+      author={Charles Packer and Sarah Wooders and Kevin Lin and Vivian Fang and Shishir G. Patil and Ion Stoica and Joseph E. Gonzalez},
+      year={2024},
+      eprint={2310.08560},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2310.08560},
+}
+
+% CMV — DAG-based structurally lossless trimming
+@misc{cmv2026,
+      title={Contextual Memory Virtualisation: DAG-Based State Management and Structurally Lossless Trimming for LLM Agents},
+      author={Cosmo Santoni},
+      year={2026},
+      eprint={2602.22402},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2602.22402},
+}
+
+% Focus — agent-autonomous context compression
+@misc{verma2026focus,
+      title={Active Context Compression: Autonomous Memory Management in LLM Agents},
+      author={Nikhil Verma},
+      year={2026},
+      eprint={2601.07190},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2601.07190},
+}
+
+% SideQuest — model-driven KV cache eviction
+@misc{sidequest2026,
+      title={SideQuest: Model-Driven KV Cache Management for Long-Horizon Agentic Reasoning},
+      author={Sanjay Kariyappa and G. Edward Suh},
+      year={2026},
+      eprint={2602.22603},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2602.22603},
 }

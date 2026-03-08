@@ -1,0 +1,38 @@
+{
+  "config": {
+    "roots": [
+      "/home/tony/.claude/projects",
+      "/home/tony/projects/yanantin/tmp/ubuntu-vm.claude/projects"
+    ],
+    "min_size": 10000
+  },
+  "raw": {
+    "sessions": 913,
+    "by_type": {
+      "main": 124,
+      "other": 3,
+      "subagent": 606,
+      "compact": 159,
+      "prompt_suggestion": 21
+    },
+    "total_bytes": 829386768
+  },
+  "dedup_by_content": {
+    "sessions": 751,
+    "by_type": {
+      "main": 98,
+      "other": 2,
+      "subagent": 502,
+      "compact": 128,
+      "prompt_suggestion": 21
+    },
+    "total_bytes": 734288355
+  },
+  "desktop": {
+    "exists": true,
+    "conversations": 335,
+    "total_chat_messages": 15952,
+    "first_created_at": "2024-10-10T12:54:30.334977Z",
+    "last_created_at": "2025-12-02T14:24:17.996854Z"
+  }
+}

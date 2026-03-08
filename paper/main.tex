@@ -5,6 +5,7 @@
 \usepackage{pgfplots}
 \usepackage{tikz}
 \usepackage{subcaption}
+\usepackage{enumitem}
 
 \pgfplotsset{compat=1.18}
 \usepgfplotslibrary{fillbetween}
@@ -51,7 +52,6 @@
 \keywords{context windows, virtual memory, demand paging, large language models, agentic AI, working set, eviction policy}
 
 \begin{document}
-\maketitle
 
 % ====================================================================
 \begin{abstract}
@@ -86,6 +86,7 @@ report on the first two levels deployed in production use, and
 identify rolling conversation compaction as the mechanism that
 connects session-level context management to cross-session memory.
 \end{abstract}
+\maketitle
 
 % ====================================================================
 \section{Introduction}
@@ -158,7 +159,7 @@ and evaluated. The remaining levels are designed and their
 mechanisms identified.
 
 The contributions:
-\begin{enumerate}[nosep]
+\begin{enumerate}
   \item The first large-scale empirical characterization of context
     window utilization in production agentic AI, establishing that
     21.8\% of tokens are structural waste with a measured taxonomy.
@@ -318,7 +319,7 @@ interface to L4~(persistent memory stores).
 \label{sec:related}
 
 \paragraph{Context compression.}
-LLMLingua~\citep{jiang2023llmlingua} and related approaches compress
+LLMLingua~\citep{jiang2024longllmlingua} and related approaches compress
 prompts by removing tokens predicted to be low-information. These
 are lossy, model-dependent operations applied to content. Our
 interventions are structural: we remove entire categories of waste
@@ -369,6 +370,34 @@ engineering team describes practical
 patterns~\citep{rajasekaran2025context}. Our work provides a specific
 mechanism (proxy-layer interposition with eviction policies) and the
 empirical production data that the field currently lacks.
+
+\paragraph{Prompt-level memory management.}
+MemGPT~\citep{packer2023memgpt} pioneered the OS virtual memory
+analogy: a FIFO message queue with recursive summarization at
+capacity, plus archival/recall databases accessible via tool calls.
+The model can save information but cannot explicitly release it;
+eviction is capacity-triggered (flush at 100\%), not cost-driven.
+Contextual Memory Virtualisation~\citep{cmv2026} models session
+history as a DAG with structurally lossless trimming that strips
+mechanical bloat (raw tool outputs, base64, metadata) while
+preserving conversational content verbatim---achieving up to 86\%
+reduction for tool-heavy sessions. Focus~\citep{verma2026focus}
+gives the agent autonomy over compression: the LLM consolidates
+learnings into a persistent knowledge block and prunes raw history,
+inspired by slime mold exploration. SideQuest~\citep{sidequest2026}
+teaches the model to evict stale tool outputs from the KV cache via
+a fine-tuned parallel reasoning thread, achieving 56--65\% peak
+memory reduction---but eviction is irreversible and requires
+inference engine modifications.
+
+These systems address the architectural problem (MemGPT's VM
+analogy), the structural problem (CMV's lossless trimming), the
+autonomy problem (Focus's model-directed compression), or the
+inference problem (SideQuest's KV cache eviction). None derives an
+economic model where prompt-token retention cost scales quadratically
+while fault cost scales linearly. None provides cooperative
+recall/release primitives informed by that cost model. None reports
+empirical fault rates on production sessions.
 
 \paragraph{Positioning.}
 Prior work addresses either the cost problem (quadratic analyses) or
@@ -554,8 +583,8 @@ We instrument Claude Code, Anthropic's AI coding assistant, across
 a single power user's sessions over approximately four months
 (November 2025 through March 2026). The corpus comprises 857
 sessions across 15 software projects, drawn from two sources:
-a local WSL environment (60 sessions) and an Ubuntu VM
-(753 sessions, migrated from a prior machine).
+a local WSL environment and an Ubuntu VM (migrated from a prior
+machine).
 
 Sessions are classified by type:
 \begin{itemize}[nosep]
@@ -575,6 +604,15 @@ The corpus represents 54{,}170 API calls and 4.45~billion effective
 input tokens (input tokens + cache creation + cache read tokens).
 Token usage is extracted from the API response metadata embedded in
 session transcripts.
+
+Because the live corpora continue to evolve, the paper reports a
+frozen cohort (857 sessions) rather than a moving live count. We
+provide a recount script (\texttt{tools/corpus\_counts.py}) to make
+the counting boundary and dedup assumptions explicit.
+Unless stated otherwise, all corpus tables and figures in this draft
+use the frozen cohort with a fixed counting protocol
+(\texttt{dedup\_by\_content}, \texttt{min\_size=10000}) so results are
+stable across revisions.
 
 \paragraph{Bias declaration.}
 This is a single-user corpus from a power user who regularly
@@ -636,7 +674,7 @@ conversational patterns---tool overhead ratios, amplification factors,
 and token accounting---across the full 857-session corpus using session
 transcript analysis. Phase~2 performs detailed API-level waste
 decomposition on a smaller proxy-captured sample (5~sessions,
-99~API calls) where we have full request payloads. The corpus-scale
+139~API calls) where we have full request payloads. The corpus-scale
 projection (Section~\ref{sec:corpus-projection}) then bridges the two
 phases, applying measured conversion constants from Phase~2 to the
 full corpus to estimate fleet-wide addressable waste.
@@ -1167,6 +1205,31 @@ user. The structural argument is strong---the architecture
 forces the waste---but comparative measurement of other tools
 would strengthen the generalizability claim.
 
+\subsection{Scope, Non-Goals, and Threats to Validity}
+
+\paragraph{Scope.}
+This paper evaluates context waste and demand paging behavior for
+agentic coding workloads with persistent tool and transcript history.
+The target claim is mechanism-level: when requests repeatedly resend
+large static prefixes and stale tool output, eviction plus fault-based
+restoration reduces cumulative input processing.
+
+\paragraph{Non-goals.}
+We do not claim universal percentage reductions across all assistants,
+all model families, or all task domains. We do not evaluate frontier
+reasoning benchmarks, autonomous planning quality, or human preference
+at product scale. We also do not claim that L1 expansion (larger
+context windows) is obsolete; we claim it is incomplete without
+hierarchical management.
+
+\paragraph{Threats to validity.}
+External validity is limited by the single-user corpus and one primary
+assistant implementation. Internal validity risks include prompt drift,
+toolset changes across versions, and workload phase effects that alter
+hot-set composition. To mitigate drift, we report a frozen cohort for
+headline numbers and provide executable recount tooling plus
+timestamped live snapshot artifacts for auditability.
+
 \subsection{Quality: Non-Inferiority}
 \label{sec:quality}
 
@@ -1175,7 +1238,7 @@ sufficient to justify context management: if you get equivalent results
 with less compute, that is the complete argument.
 
 \paragraph{Protocol.}
-We select 13~sessions from the corpus (426--1{,}354~messages,
+We select 18~sessions from the corpus (426--1{,}354~messages,
 340K--718K~characters of context). For each session, we construct
 paired contexts at 65--75\% of the conversation: the \emph{baseline}
 retains all messages; the \emph{treatment} replaces consumed tool
@@ -1471,6 +1534,56 @@ the strongest evidence that the interventions are practical.
 
 All instruments and data are open source:
 \url{https://github.com/fsgeek/pichay}.
+
+% ====================================================================
+\appendix
+\section{Data Snapshot and Counting Protocol}
+\label{sec:appendix-protocol}
+
+To keep counts reproducible as the live corpora evolve, we separate
+paper numbers (frozen cohort for this draft) from live recounts.
+The counting protocol is versioned in the repository:
+\texttt{docs/corpus\_protocol.md}.
+
+\paragraph{Counting tool.}
+Session counting is performed by
+\texttt{tools/corpus\_counts.py}, which classifies Claude Code JSONL
+files into \texttt{main}, \texttt{subagent}, \texttt{compact},
+\texttt{prompt\_suggestion}, and \texttt{other}, and reports both
+raw and content-hash-deduplicated totals.
+
+\paragraph{Recount command.}
+\begin{verbatim}
+./tools/reproduce_paper_counts.sh
+\end{verbatim}
+This writes a timestamped snapshot JSON to
+\texttt{paper/data/corpus\_snapshot\_YYYYMMDD\_live.json}.
+
+\paragraph{5-minute reproduction path.}
+From repository root:
+\begin{verbatim}
+./tools/reproduce_paper_counts.sh
+python3 tools/check_paper_numbers.py \
+  --paper paper/main.tex \
+  --snapshot paper/data/corpus_snapshot_20260307_live.json
+latexmk -pdf paper/main.tex
+\end{verbatim}
+Expected outputs: (1) a new snapshot JSON under \texttt{paper/data/},
+(2) a paper-number consistency report, and (3) \texttt{paper/main.pdf}.
+On a typical laptop this path completes in minutes; the recount step is
+I/O-bound on local corpus size.
+
+\paragraph{Current live recount artifact (2026-03-07).}
+\texttt{paper/data/corpus\_snapshot\_20260307\_live.json}
+with roots:
+\texttt{\~/.claude/projects} and
+\texttt{\~/projects/yanantin/tmp/ubuntu-vm.claude/projects},
+size filter \texttt{min\_size=10000}, and Claude Desktop summary
+from \texttt{\~/projects/yanantin/tmp/claude-desktop/conversations.json}.
+
+For this paper version, headline results use a frozen cohort to
+avoid drift across revisions; live recount artifacts are provided for
+auditability.
 
 % ====================================================================
 \bibliographystyle{ACM-Reference-Format}
