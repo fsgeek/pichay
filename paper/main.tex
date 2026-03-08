@@ -1265,6 +1265,30 @@ by object size. Combined with the quadratic fault penalty, this argues
 for a \emph{size-aware, fill-sensitive} replacement policy that has no
 direct analogue in the classical VM literature.
 
+\paragraph{Cache invalidation cost.}
+The cost model so far considers only token-level costs (keeping and
+faulting). Structural mutations---collapse operations that remove or
+replace blocks in the message array---have an additional cost:
+\emph{prompt cache invalidation}. Inference providers cache the
+tokenized prefix of repeated requests; when the prefix changes, the
+cache misses and the entire context must be reprocessed.
+
+In production, a collapse operation that compressed 12~turns of
+orientation dialogue into a single summary sentence caused the cache
+hit rate to drop from 100\% to 25\% for one turn, then recover to
+100\% on the following turn as the new prefix stabilized. The cost
+was one full recompute of $\sim$105K tokens---comparable to the
+cost of several page faults. A collapse that saves 10KB of context
+but invalidates a 100K-token cached prefix is a net loss unless the
+space savings persist for enough subsequent turns to amortize the
+one-time recompute.
+
+This argues for \emph{batching} structural mutations: accumulate
+collapse candidates and execute them together in a single pass,
+paying the cache invalidation cost once rather than per-operation.
+It also argues against frequent small collapses in favor of
+infrequent large ones.
+
 \paragraph{Pin decay.}
 The inverted cost model also argues against permanent pins. In our
 current design (Section~\ref{sec:pinning}), one fault pins a page
