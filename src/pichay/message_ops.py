@@ -124,18 +124,35 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
     return "; ".join(stats_parts) if stats_parts else None
 
 
-def _compute_pressure(ts: dict, cap: int) -> tuple[int, int, int, float, str]:
-    """Derive context pressure metrics. Returns (effective, limit, hard_cap, pct, pressure)."""
+def _compute_pressure(ts: dict, cap: int, policy=None) -> tuple[int, int, int, float, str]:
+    """Derive context pressure metrics from PagingPolicy zones.
+
+    Uses the policy's token-based thresholds (advisory, involuntary,
+    hard_cap) instead of hardcoded percentages. Falls back to the
+    global default policy if none is provided.
+
+    Returns (effective, limit, hard_cap, pct, pressure).
+    """
+    from pichay.config import get_policy
+
+    if policy is None:
+        policy = get_policy()
+
     effective = ts["last_effective"]
-    context_limit = cap if cap > 0 else 200_000
-    hard_cap = int(context_limit * 0.85)
+    context_limit = policy.window_size
+    hard_cap = policy.hard_cap_tokens
     pct = (effective / context_limit * 100) if context_limit > 0 else 0
-    if pct > 70:
-        pressure = "high"
-    elif pct > 50:
-        pressure = "moderate"
-    else:
-        pressure = "low"
+
+    # Map policy zones to pressure labels
+    zone = policy.zone(effective)
+    _ZONE_TO_PRESSURE = {
+        "normal": "low",
+        "advisory": "moderate",
+        "involuntary": "high",
+        "aggressive": "critical",
+    }
+    pressure = _ZONE_TO_PRESSURE.get(zone, "low")
+
     return effective, context_limit, hard_cap, pct, pressure
 
 
