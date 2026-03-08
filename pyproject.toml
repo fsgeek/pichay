@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
     "flask>=3.0",
+    "fastapi>=0.116.0",
+    "uvicorn>=0.35.0",
+    "prometheus-client>=0.23.0",
     "matplotlib>=3.10.8",
     "anthropic>=0.84.0",
     "numpy>=2.4.2",
@@ -20,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-pichay = "pichay.proxy:main"
+pichay = "pichay.gateway:main"
 
 [build-system]
 requires = ["hatchling"]
