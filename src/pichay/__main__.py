@@ -30,7 +30,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pichay.proxy import create_app, find_free_port
+# Transitional: proxy.py moved to deprecated/. Gateway is the primary path
+# but the experiment runner still needs Flask until fully ported.
+from pichay.deprecated.proxy import create_app, find_free_port
 
 
 def find_project_claude_dir(project_dir: str) -> Path:

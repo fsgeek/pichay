@@ -40,6 +40,21 @@ class BlockStore:
         self._by_id: dict[str, BlockEntry] = {}
         self._by_hash: dict[str, str] = {}  # content_hash → block_id
 
+    _LABEL_RE = re.compile(r"^\[(?:tensor|block):([0-9a-f]+)[ (]")
+
+    def _has_our_label(self, text: str) -> bool:
+        """Check if text starts with a label WE placed.
+
+        Validates the ID against known block IDs. Foreign labels
+        (injected via file contents, tool results, or crafted messages)
+        will have unrecognized IDs and return False, preventing an
+        attacker from skipping labeling or spoofing block references.
+        """
+        m = self._LABEL_RE.match(text)
+        if m is None:
+            return False
+        return m.group(1) in self._by_id
+
     def label_messages(self, messages: list[dict], current_turn: int) -> None:
         """Inject [block:xxxx] labels into message content.
 
@@ -59,8 +74,8 @@ class BlockStore:
 
             # String content (simple user messages)
             if isinstance(content, str):
-                # Skip if already labeled
-                if content.startswith("[tensor:") or content.startswith("[block:"):
+                # Skip if already labeled by us (validated against known IDs)
+                if self._has_our_label(content):
                     continue
                 # Skip very short messages (not worth labeling)
                 if len(content) < 200:
@@ -79,8 +94,8 @@ class BlockStore:
                     if block.get("type") != "text":
                         continue
                     text = block.get("text", "")
-                    # Skip if already labeled
-                    if text.startswith("[tensor:") or text.startswith("[block:"):
+                    # Skip if already labeled by us (validated against known IDs)
+                    if self._has_our_label(text):
                         continue
                     # Skip short blocks
                     if len(text) < 200:

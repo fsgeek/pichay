@@ -320,9 +320,11 @@ def test_sessions_api_accumulates(tmp_path: Path):
     resp = client.get("/api/sessions")
     assert resp.status_code == 200
     sessions = resp.json()["sessions"]
-    assert "proc_sess" in sessions
-    assert sessions["proc_sess"]["request_count"] == 2
-    assert sessions["proc_sess"]["incoming_bytes"] > 0
+    # Sessions are keyed by per-conversation fingerprint, not process ID
+    assert len(sessions) >= 1
+    session = next(iter(sessions.values()))
+    assert session["request_count"] == 2
+    assert session["incoming_bytes"] > 0
 
 
 # ── Observability: events API with valid window ────────────────────

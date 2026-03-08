@@ -368,6 +368,15 @@ def create_app(
             pct = effective / token_cap * 100
             cap_str = f"/{token_cap // 1000}k ({pct:.0f}%)"
 
+        # Cache hit rate: fraction of input tokens served from KV cache
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_create = usage.get("cache_creation_input_tokens", 0)
+        cache_total = cache_read + cache_create
+        cache_str = ""
+        if cache_total > 0:
+            cache_pct = cache_read / cache_total * 100
+            cache_str = f" | cache {cache_pct:.0f}%"
+
         ev_str = ""
         if ps is not None:
             pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
@@ -378,7 +387,7 @@ def create_app(
 
         print(
             f"  [{sid}] [Turn {ts['turn']}] "
-            f"{effective:,} tok{cap_str}{ev_str}",
+            f"{effective:,} tok{cap_str}{cache_str}{ev_str}",
             file=sys.stderr,
         )
 

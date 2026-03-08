@@ -7,12 +7,42 @@ They don't use any closure state — all dependencies are explicit parameters.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pichay.blocks import BlockStore
 
 PICHAY_STATUS_MARKER = "[pichay-system-status]"
+
+# Detect cleanup tags in inbound content (user/tool_result messages).
+# If present, the request is rejected — turns exploitation into DoS.
+_CLEANUP_TAG_RE = re.compile(r"<memory_cleanup>", re.IGNORECASE)
+
+
+def check_inbound_for_injected_tags(body: dict) -> str | None:
+    """Scan inbound messages for injected <memory_cleanup> tags.
+
+    Returns an error message if found, None if clean. Only scans
+    user messages (which contain tool results and user input) —
+    assistant messages are the model's own output and may
+    legitimately contain cleanup tags.
+    """
+    for msg in body.get("messages", []):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            if _CLEANUP_TAG_RE.search(content):
+                return "Rejected: inbound message contains <memory_cleanup> tags"
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text", "") or block.get("content", "")
+                if isinstance(text, str) and _CLEANUP_TAG_RE.search(text):
+                    return f"Rejected: inbound {block.get('type', 'block')} contains <memory_cleanup> tags"
+    return None
 
 
 def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
@@ -89,95 +119,68 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
     return "; ".join(stats_parts) if stats_parts else None
 
 
-def inject_system_status(body: dict, ts: dict, cap: int,
-                         request_time, block_store=None) -> None:
-    """Inject or replace a system status block with context pressure info.
-
-    Gives the model awareness of:
-    - That it's running under Pichay (experimental virtual memory)
-    - Current time/date
-    - Memory usage relative to the hard cap (85% of context window)
-    - Block inventory and cooperative memory instructions at moderate+ pressure
-    """
+def _compute_pressure(ts: dict, cap: int) -> tuple[int, int, int, float, str]:
+    """Derive context pressure metrics. Returns (effective, limit, hard_cap, pct, pressure)."""
     effective = ts["last_effective"]
     context_limit = cap if cap > 0 else 200_000
     hard_cap = int(context_limit * 0.85)
     pct = (effective / context_limit * 100) if context_limit > 0 else 0
-    pressure = "low"
     if pct > 70:
         pressure = "high"
     elif pct > 50:
         pressure = "moderate"
+    else:
+        pressure = "low"
+    return effective, context_limit, hard_cap, pct, pressure
 
-    time_str = request_time.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    status_text = (
-        f"{PICHAY_STATUS_MARKER}\n"
-        f"This system is running under Pichay, an experimental "
-        f"virtual memory manager for LLM context windows. Evicted "
-        f"content is replaced with [tensor:handle — description] "
-        f"markers. Use the recall tool with the tensor handle(s) to "
-        f"restore content. Faster and cheaper than re-reading files. "
-        f"You can proactively release tensors you "
-        f"no longer need using memory_release. If you observe "
-        f"anomalous behavior (missing context, unexpected gaps), "
-        f"describe it to aid debugging.\n\n"
-        f"Current time: {time_str}\n"
-        f"Context usage: {effective:,} / {context_limit:,} tokens "
-        f"({pct:.0f}%) | pressure: {pressure}\n"
-        f"Hard cap: {hard_cap:,} tokens (85% of context window)"
-    )
+# Default static system prompt — identical every request, cache-friendly.
+_DEFAULT_SYSTEM_TEXT = (
+    f"{PICHAY_STATUS_MARKER}\n"
+    "This system is running under Pichay, an experimental "
+    "virtual memory manager for LLM context windows. Evicted "
+    "content is replaced with [tensor:handle — description] "
+    "markers. Use the recall tool with the tensor handle(s) to "
+    "restore content. Faster and cheaper than re-reading files. "
+    "You can proactively release tensors you "
+    "no longer need using memory_release. If you observe "
+    "anomalous behavior (missing context, unexpected gaps), "
+    "describe it to aid debugging."
+)
 
-    if pressure in ("moderate", "high") and block_store is not None:
-        large = block_store.large_blocks(min_size=2000)
-        if large:
-            block_lines = []
-            for b in large[:5]:
-                size_k = b.size / 1024
-                block_lines.append(
-                    f"  - [block:{b.block_id}] {b.role} turn {b.turn} "
-                    f"({size_k:.1f}KB): {b.preview}"
-                )
-            status_text += (
-                f"\n\nLargest conversation blocks "
-                f"({block_store.block_count} tracked):\n"
-                + "\n".join(block_lines)
-            )
 
-        status_text += (
-            "\n\nCooperative memory: You can manage conversation memory "
-            "by including <memory_cleanup> tags in your response. "
-            "Operations:\n"
-            "  drop: block:XXXX           — archive block content\n"
-            "  summarize: block:XXXX \"summary\" — replace with your summary\n"
-            "  anchor: block:XXXX         — mark block to keep\n"
-            "  release: path1, path2      — release file contents\n"
-            "Tags are processed on the next turn and stripped from history."
-        )
+def get_system_prompt() -> str:
+    """Return the Pichay system prompt text to inject.
 
-    # --- End-of-messages anchor (temporal perception experiment) ---
-    # Inject a compact status line at the end of the messages array
-    # so the model treats it as current data, not historical setup.
-    messages = body.get("messages", [])
-    if messages and effective > 0:
-        local_time_str = request_time.astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-        anchor = (
-            f"\n[pichay-live-status] "
-            f"Time: {local_time_str} | "
-            f"Context: {effective:,}/{context_limit:,} tok ({pct:.0f}%) | "
-            f"Pressure: {pressure}"
-        )
-        last_msg = messages[-1]
-        if last_msg.get("role") == "user":
-            content = last_msg.get("content", "")
-            if isinstance(content, str):
-                last_msg["content"] = content + anchor
-            elif isinstance(content, list):
-                last_msg["content"].append({
-                    "type": "text",
-                    "text": anchor,
-                })
+    Currently returns a static default. This is the seam for future
+    dynamism: Arbiter-managed system prompts, cache_control markers
+    around mutable regions, per-session customization, etc.
 
+    The returned text MUST be stable across requests within a session
+    to preserve KV cache prefix coherence. Change it only at natural
+    boundaries (session start, post-compaction) where a cache miss
+    is already expected.
+    """
+    return _DEFAULT_SYSTEM_TEXT
+
+
+def inject_system_status(body: dict, ts: dict, cap: int,
+                         request_time, block_store=None) -> None:
+    """Inject a static system status block and a dynamic end-of-messages anchor.
+
+    The system prompt block is STATIC (cache-friendly). All dynamic content
+    (time, token counts, pressure, block inventory) goes into an anchor
+    appended to the last user message, which is after the last cache
+    breakpoint and therefore free to mutate without thrashing the KV cache.
+
+    Prior to 2026-03-08 this injected dynamic content into the system prompt
+    on every request, invalidating the entire KV cache prefix each turn.
+    See docs/design-cache-aware.md for the diagnosis.
+    """
+    effective, context_limit, hard_cap, pct, pressure = _compute_pressure(ts, cap)
+
+    # --- Static system prompt block (cache-stable) ---
+    status_text = get_system_prompt()
     system = body.get("system", "")
     if isinstance(system, list):
         replaced = False
@@ -199,6 +202,51 @@ def inject_system_status(body: dict, ts: dict, cap: int,
             body["system"] = system + "\n\n" + status_text
     else:
         body["system"] = status_text
+
+    # --- Dynamic anchor (end-of-messages, after last cache breakpoint) ---
+    # All per-request dynamic content goes here where it can't thrash the cache.
+    messages = body.get("messages", [])
+    if not messages or effective <= 0:
+        return
+
+    local_time_str = request_time.astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+    anchor_parts = [
+        f"\n[pichay-live-status] "
+        f"Time: {local_time_str} | "
+        f"Context: {effective:,}/{context_limit:,} tok ({pct:.0f}%) | "
+        f"Pressure: {pressure} | "
+        f"Hard cap: {hard_cap:,} tok"
+    ]
+
+    if pressure in ("moderate", "high") and block_store is not None:
+        large = block_store.large_blocks(min_size=2000)
+        if large:
+            block_lines = [
+                f"  - [block:{b.block_id}] {b.role} turn {b.turn} "
+                f"({b.size / 1024:.1f}KB): {b.preview}"
+                for b in large[:5]
+            ]
+            anchor_parts.append(
+                f"\nLargest blocks ({block_store.block_count} tracked):\n"
+                + "\n".join(block_lines)
+            )
+        anchor_parts.append(
+            "\nCooperative memory: include <memory_cleanup> tags to manage. "
+            "Ops: drop:XXXX, summarize:XXXX \"text\", anchor:XXXX, "
+            "release: path1,path2"
+        )
+
+    anchor = "".join(anchor_parts)
+    last_msg = messages[-1]
+    if last_msg.get("role") == "user":
+        content = last_msg.get("content", "")
+        if isinstance(content, str):
+            last_msg["content"] = content + anchor
+        elif isinstance(content, list):
+            last_msg["content"].append({
+                "type": "text",
+                "text": anchor,
+            })
 
 
 def measure_system_prompt(body: dict) -> dict:

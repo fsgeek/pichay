@@ -28,10 +28,15 @@ import json
 import os
 import time
 
+import re
+
 import httpx
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Matches tensor labels we generate: [tensor:HEXHASH — ...]
+_TENSOR_LABEL_RE = re.compile(r"^\[tensor:([0-9a-f]+) ")
 
 
 @dataclass
@@ -880,12 +885,16 @@ def _check_pin_freshness(
             if key is None or key not in page_store._pinned:
                 continue
             block_content = block.get("content", "")
-            # Skip already-evicted summaries
-            if isinstance(block_content, str) and (
-                block_content.startswith("[tensor:")
-                or block_content.startswith("[Paged out:")
-            ):
-                continue
+            # Skip already-evicted summaries — validate the tensor handle
+            # is one we actually issued to prevent spoofed labels from
+            # bypassing pin detection.
+            if isinstance(block_content, str):
+                # "[Paged out:" is a legacy marker no longer generated.
+                # Don't trust it as a skip signal — spoofable prefix.
+                if block_content.startswith("[tensor:"):
+                    m = _TENSOR_LABEL_RE.match(block_content)
+                    if m and m.group(1) in page_store._tensor_index:
+                        continue
             latest[key] = _content_hash(block_content)
 
     # Unpin if the latest read has different content

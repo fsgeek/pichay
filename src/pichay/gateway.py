@@ -1,6 +1,24 @@
+"""Pichay gateway — cache-aware multi-provider proxy for LLM context management.
+
+Primary entry point. Supersedes deprecated/proxy.py (Flask).
+
+Architecture:
+    Claude Code → Gateway (FastAPI) → Provider (Anthropic, OpenAI)
+
+The gateway intercepts, transforms, and forwards API requests. Features:
+- Per-conversation session management with stable fingerprinting
+- Static system prompt injection (cache-friendly, no prefix mutation)
+- Dynamic status anchor (end-of-messages, after cache breakpoints)
+- Token cap enforcement with cache hit rate tracking
+- Policy pipeline: phantom protection → paging → trim
+- Multi-provider support via adapter pattern
+- Prometheus metrics + live HTML dashboard
+"""
+
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import asynccontextmanager
 import json
 import socket
@@ -17,19 +35,45 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from pichay.blocks import BlockStore
 from pichay.core.models import CanonicalRequest
 from pichay.core.pipeline import Pipeline
 from pichay.core.policy import PolicyConfig, collect_blocks
 from pichay.core.utils import parse_duration
 from pichay.launcher import LaunchSpec, launch
+from pichay.message_ops import (
+    check_inbound_for_injected_tags,
+    get_system_prompt,
+    inject_system_status,
+    PICHAY_STATUS_MARKER,
+)
+from pichay.pager import PageStore
 from pichay.providers import adapters
 from pichay.telemetry import Telemetry
+
+
+# ANSI for stderr status lines
+_DIM = "\033[2m"
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
+_RESET = "\033[0m"
 
 
 def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _session_id(body: dict) -> str:
+    """Derive a stable session fingerprint from the first user message.
+
+    Different conversations have different first messages, so this
+    is unique per conversation and stable across turns.
+    """
+    messages = body.get("messages", [])
+    first = json.dumps(messages[0], sort_keys=True) if messages else ""
+    return hashlib.sha256(first.encode()).hexdigest()[:8]
 
 
 def _duplication_score(req: CanonicalRequest) -> float:
@@ -313,18 +357,76 @@ def _dashboard_html() -> str:
 """
 
 
+# ── Session state ────────────────────────────────────────────────────────
+
+class Session:
+    """Per-conversation state. Isolated by first-message fingerprint."""
+
+    def __init__(self, sid: str, log_dir: Path):
+        self.id = sid
+        self.token_state = {
+            "last_effective": 0,
+            "blocked": False,
+            "turn": 0,
+        }
+        self.page_store = PageStore(
+            log_path=log_dir / f"pages_{sid}.jsonl",
+        )
+        self.block_store = BlockStore()
+
+    def track_usage(self, usage: dict) -> None:
+        """Update token state from API response usage."""
+        effective = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
+        if effective > 0:
+            self.token_state["last_effective"] = effective
+
+    def increment_turn(self) -> None:
+        self.token_state["turn"] += 1
+
+
+class SessionStore:
+    """Maps conversation fingerprints to session state."""
+
+    def __init__(self, log_dir: Path):
+        self._sessions: dict[str, Session] = {}
+        self._log_dir = log_dir
+
+    def get(self, body: dict) -> Session:
+        sid = _session_id(body)
+        if sid not in self._sessions:
+            self._sessions[sid] = Session(sid, self._log_dir)
+            print(
+                f"  {_DIM}[{sid}] new session{_RESET}",
+                file=sys.stderr,
+            )
+        return self._sessions[sid]
+
+    def all(self) -> dict[str, Session]:
+        return dict(self._sessions)
+
+
+# ── Gateway factory ──────────────────────────────────────────────────────
+
 def create_app(
     *,
     log_dir: Path,
-    anthropic_upstream: str,
-    openai_upstream: str,
-    hydration_window_seconds: int,
-    enable_paging: bool,
-    enable_trim: bool,
-    min_evict_size: int,
-    process_session_id: str,
+    anthropic_upstream: str = "https://api.anthropic.com",
+    openai_upstream: str = "https://api.openai.com",
+    hydration_window_seconds: int = 86400,
+    enable_paging: bool = True,
+    enable_trim: bool = True,
+    min_evict_size: int = 500,
+    token_cap: int = 0,
+    process_session_id: str | None = None,
 ) -> FastAPI:
     clients: dict[str, httpx.Client] = {}
+
+    if process_session_id is None:
+        process_session_id = datetime.now(timezone.utc).strftime("proc_%Y%m%d_%H%M%S")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -334,13 +436,18 @@ def create_app(
             for c in clients.values():
                 c.close()
 
-    app = FastAPI(title="Pichay Gateway", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Pichay Gateway", version="0.3.0", lifespan=lifespan)
 
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"gateway_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.jsonl"
     telemetry = Telemetry(log_path=log_path, hydration_window_seconds=hydration_window_seconds)
     app.state.telemetry = telemetry
     app.state.process_session_id = process_session_id
+
+    sessions = SessionStore(log_dir)
+    app.state.sessions = sessions
+
+    _token_warning_threshold = int(token_cap * 0.80) if token_cap > 0 else 0
 
     cfg = PolicyConfig(
         enable_paging=enable_paging,
@@ -365,13 +472,28 @@ def create_app(
     })
     app.state.clients = clients
 
+    # ── Endpoints ────────────────────────────────────────────────────
+
     @app.get("/health")
     def health() -> dict[str, Any]:
+        all_sessions = sessions.all()
+        session_summaries = {}
+        for sid, s in all_sessions.items():
+            ps = s.page_store
+            session_summaries[sid] = {
+                "turn": s.token_state["turn"],
+                "last_effective_tokens": s.token_state["last_effective"],
+                "evictions": ps.unique_evictions,
+                "gc": ps.gc_count,
+                "faults": len(ps.faults),
+            }
         return {
             "status": "ok",
             "process_session_id": process_session_id,
             "providers": ["anthropic", "openai"],
             "log_path": str(log_path),
+            "token_cap": token_cap,
+            "sessions": session_summaries,
         }
 
     @app.get("/metrics")
@@ -399,6 +521,92 @@ def create_app(
     def dashboard() -> HTMLResponse:
         return HTMLResponse(_dashboard_html())
 
+    # ── Pre/post processing ──────────────────────────────────────────
+
+    def _preprocess(payload: dict, session: Session) -> dict:
+        """Apply gateway transformations before pipeline and forwarding.
+
+        Operates on the raw Anthropic-format payload (before normalization)
+        because system prompt injection needs access to the system field
+        directly.
+        """
+        session.increment_turn()
+        ts = session.token_state
+        request_time = datetime.now(timezone.utc)
+
+        # System status: static system prompt + dynamic anchor
+        inject_system_status(
+            payload, ts, token_cap, request_time,
+            block_store=session.block_store,
+        )
+
+        # Block labeling (with injection-safe validation)
+        messages = payload.get("messages", [])
+        session.block_store.label_messages(messages, ts["turn"])
+
+        return payload
+
+    def _check_token_cap(usage: dict, session: Session) -> None:
+        """Track usage and enforce token cap."""
+        session.track_usage(usage)
+        if token_cap <= 0:
+            return
+
+        effective = session.token_state["last_effective"]
+        pct = effective / token_cap * 100
+        sid = session.id
+
+        if effective > token_cap:
+            session.token_state["blocked"] = True
+            print(
+                f"{_RED}  [{sid}] TOKEN CAP EXCEEDED: {effective:,} / {token_cap:,} "
+                f"({pct:.0f}%) — next request will be blocked{_RESET}",
+                file=sys.stderr,
+            )
+
+    def _display_turn_status(usage: dict, session: Session) -> None:
+        """Post-response status line with cache hit rate."""
+        sid = session.id
+        ts = session.token_state
+        effective = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
+        if effective == 0:
+            return
+
+        cap_str = ""
+        if token_cap > 0:
+            pct = effective / token_cap * 100
+            cap_str = f"/{token_cap // 1000}k ({pct:.0f}%)"
+
+        # Cache hit rate
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_create = usage.get("cache_creation_input_tokens", 0)
+        cache_total = cache_read + cache_create
+        cache_str = ""
+        if cache_total > 0:
+            cache_pct = cache_read / cache_total * 100
+            cache_str = f" | cache {cache_pct:.0f}%"
+
+        ps = session.page_store
+        ev_str = ""
+        if ps.unique_evictions > 0 or ps.gc_count > 0:
+            pin_str = f" pin {len(ps._pinned)}" if ps._pinned else ""
+            ev_str = (
+                f" | ev {ps.unique_evictions} gc {ps.gc_count}{pin_str}"
+                f" | faults {len(ps.faults)}/{ps.unique_evictions}"
+            )
+
+        print(
+            f"  [{sid}] [Turn {ts['turn']}] "
+            f"{effective:,} tok{cap_str}{cache_str}{ev_str}",
+            file=sys.stderr,
+        )
+
+    # ── Request handling ─────────────────────────────────────────────
+
     def _handle_provider_request(
         provider: str,
         endpoint: str,
@@ -407,20 +615,40 @@ def create_app(
     ):
         payload = dict(payload)
         forwarded_headers = payload.pop("_headers", {})
+
+        # Session management
+        session = sessions.get(payload)
+
+        # Token cap enforcement
+        if token_cap > 0 and session.token_state.get("blocked"):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Token cap exceeded ({session.token_state['last_effective']:,}/{token_cap:,})",
+            )
+
+        # Reject inbound cleanup tag injection
+        tag_error = check_inbound_for_injected_tags(payload)
+        if tag_error:
+            print(f"  {_RED}[{session.id}] {tag_error}{_RESET}", file=sys.stderr)
+            raise HTTPException(status_code=400, detail=tag_error)
+
+        # Pre-process: system status, block labeling
+        if endpoint == "messages":
+            payload = _preprocess(payload, session)
+
         adapter = app.state.adapters[provider]
         client: httpx.Client = app.state.clients[provider]
 
         request_id = str(uuid.uuid4())
         started = time.perf_counter()
         incoming_bytes = len(json.dumps(payload, default=str).encode("utf-8"))
-        session_id = app.state.process_session_id
+        session_id = session.id
 
         req = adapter.normalize_request(payload)
         req = pipeline.run(req)
         duplication_score = _duplication_score(req)
         outgoing_body = adapter.denormalize_request(req)
         if endpoint == "count_tokens":
-            # Anthropic count_tokens rejects generation-only fields.
             outgoing_body.pop("stream", None)
             outgoing_body.pop("max_tokens", None)
         outgoing_bytes = len(json.dumps(outgoing_body, default=str).encode("utf-8"))
@@ -475,6 +703,10 @@ def create_app(
                 finally:
                     if stream_error:
                         status_code = 599
+                    # Post-response: track usage, display status
+                    if usage:
+                        _check_token_cap(usage, session)
+                        _display_turn_status(usage, session)
                     emit_event(
                         "response_observed",
                         request_id=request_id,
@@ -502,6 +734,7 @@ def create_app(
                     )
             return StreamingResponse(generate(), media_type="text/event-stream")
 
+        # Non-streaming
         try:
             resp = client.post(upstream_path, json=outgoing_body, headers=headers)
         except httpx.HTTPError as e:
@@ -523,6 +756,11 @@ def create_app(
                     usage = u
         except Exception:
             usage = {}
+
+        if usage:
+            _check_token_cap(usage, session)
+            _display_turn_status(usage, session)
+
         emit_event(
             "response_observed",
             request_id=request_id,
@@ -569,7 +807,6 @@ def create_app(
     @app.post("/v1/messages/count_tokens")
     async def anthropic_count_tokens(request: Request):
         payload = await request.json()
-        # Count-tokens is intentionally pass-through but still instrumented.
         payload = _payload_with_headers(request, payload)
         payload["stream"] = False
         return _handle_provider_request(
@@ -617,10 +854,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=0, help="Gateway port (0=random)")
     parser.add_argument("--log-dir", type=Path, default=Path("logs"), help="Telemetry log directory")
     parser.add_argument("--hydration-window", default="24h", help="Dashboard hydration window (e.g. 24h, 7d)")
-    parser.add_argument("--metrics-port", type=int, default=0, help="Reserved for compatibility; metrics served on gateway port")
-    parser.add_argument("--dashboard", action="store_true", help="Reserved for compatibility; dashboard APIs are always available")
     parser.add_argument("--anthropic-upstream", default="https://api.anthropic.com")
     parser.add_argument("--openai-upstream", default="https://api.openai.com")
+    parser.add_argument("--token-cap", type=int, default=0, help="Token cap (0=unlimited)")
     parser.add_argument("--disable-paging", action="store_true")
     parser.add_argument("--disable-trim", action="store_true")
     parser.add_argument("--min-evict-size", type=int, default=500)
@@ -637,7 +873,6 @@ def main() -> None:
         parser.error(str(e))
 
     port = args.port if args.port != 0 else find_free_port()
-    process_session_id = datetime.now(timezone.utc).strftime("proc_%Y%m%d_%H%M%S")
 
     app = create_app(
         log_dir=args.log_dir,
@@ -647,7 +882,7 @@ def main() -> None:
         enable_paging=not args.disable_paging,
         enable_trim=not args.disable_trim,
         min_evict_size=args.min_evict_size,
-        process_session_id=process_session_id,
+        token_cap=args.token_cap,
     )
 
     if args.no_launch:
