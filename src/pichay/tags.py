@@ -20,16 +20,26 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class CollapseOp:
+    """A turn-range collapse: replace multiple turns with a summary."""
+    start_turn: int
+    end_turn: int
+    summary: str
+
+
+@dataclass
 class CleanupOps:
     """Parsed cleanup operations from a <memory_cleanup> tag."""
     drops: list[str] = field(default_factory=list)
     summaries: list[tuple[str, str]] = field(default_factory=list)
     anchors: list[str] = field(default_factory=list)
     releases: list[str] = field(default_factory=list)
+    collapses: list[CollapseOp] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not (self.drops or self.summaries or self.anchors or self.releases)
+        return not (self.drops or self.summaries or self.anchors
+                    or self.releases or self.collapses)
 
     def __str__(self) -> str:
         parts = []
@@ -41,6 +51,8 @@ class CleanupOps:
             parts.append(f"anchor={len(self.anchors)}")
         if self.releases:
             parts.append(f"release={len(self.releases)}")
+        if self.collapses:
+            parts.append(f"collapse={len(self.collapses)}")
         return ", ".join(parts) if parts else "no-ops"
 
 
@@ -60,6 +72,12 @@ _SUMMARIZE_PATTERN = re.compile(
 
 # Match release with comma-separated paths
 _RELEASE_PATTERN = re.compile(r"release:\s*(.+)")
+
+# Match collapse with turn range and quoted summary
+# Format: collapse: turns 3-8 "Summary of what happened in those turns"
+_COLLAPSE_PATTERN = re.compile(
+    r'collapse:\s*turns\s+(\d+)\s*-\s*(\d+)\s+"([^"]*)"'
+)
 
 
 def parse_cleanup_tags(text: str) -> CleanupOps:
@@ -95,6 +113,16 @@ def parse_cleanup_tags(text: str) -> CleanupOps:
                 m = _BLOCK_ID.search(line)
                 if m:
                     ops.anchors.append(m.group(1))
+                continue
+
+            # Collapse (turn range)
+            m = _COLLAPSE_PATTERN.match(line)
+            if m:
+                ops.collapses.append(CollapseOp(
+                    start_turn=int(m.group(1)),
+                    end_turn=int(m.group(2)),
+                    summary=m.group(3),
+                ))
                 continue
 
             # Release
