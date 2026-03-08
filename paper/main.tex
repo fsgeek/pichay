@@ -82,9 +82,10 @@ theory~\citep{denning1968working}, demand paging, fault-driven
 replacement policies, and memory hierarchies with multiple
 eviction-managed levels. We describe the architecture of a full
 memory hierarchy for LLM systems (L1~through persistent storage),
-report on the first two levels deployed in production use, and
-identify rolling conversation compaction as the mechanism that
-connects session-level context management to cross-session memory.
+report on the first three levels deployed in production use
+(L1~eviction, L2~fault-driven pinning, L3~model-initiated
+conversation compaction), and identify cross-session memory as the
+remaining frontier.
 \end{abstract}
 \maketitle
 
@@ -155,8 +156,9 @@ We describe the full hierarchy: L1~(the generation window), L2~(the
 working set, demand-paged and pinned), L3~(session history,
 compressed with declared losses), and L4~(cross-session persistent
 memory, indexed and retrievable). The first two levels are deployed
-and evaluated. The remaining levels are designed and their
-mechanisms identified.
+and evaluated. L3~is implemented---the model can compress conversation
+turns into outcome summaries via cooperative cleanup tags---but not
+yet evaluated at scale. L4~is designed and its mechanisms identified.
 
 The contributions:
 \begin{enumerate}
@@ -169,17 +171,19 @@ The contributions:
   \item Fault-driven pinning: a page replacement policy that
     learns from its own mistakes---one fault pins a page for the
     session, eliminating thrashing of working-set content.
-  \item Cooperative memory management via phantom tools: a
-    side-channel mechanism enabling the model to voluntarily
-    release cold pages and request cached faults---a new point in
-    the design space not available in hardware memory hierarchies,
-    where applications are non-cooperative.
+  \item Cooperative memory management via two side channels
+    (phantom tools and cleanup tags): mechanisms enabling the model
+    to voluntarily release cold pages, request cached faults, and
+    compress conversation history---a new point in the design space
+    not available in hardware memory hierarchies, where applications
+    are non-cooperative.
   \item The architectural observation that LLM context management
     maps structurally (not merely metaphorically) to virtual memory,
     and that the full OS memory hierarchy---from cache replacement
     policies to working set theory---applies directly.
   \item Design of a four-level memory hierarchy for LLM systems,
-    with the first two levels deployed and evaluated.
+    with the first three levels deployed (L1~eviction, L2~pinning,
+    L3~cooperative compaction) and the first two evaluated.
 \end{enumerate}
 
 % ====================================================================
@@ -311,9 +315,10 @@ performance is determined by hit rates at each level, not by L1
 capacity alone.
 
 This paper implements and evaluates L1~management (eviction and
-garbage collection) and L2~management (fault-driven pinning). We
-design L3~(rolling conversation compaction) and describe the
-interface to L4~(persistent memory stores).
+garbage collection) and L2~management (fault-driven pinning).
+L3~(rolling conversation compaction) is implemented via cooperative
+cleanup tags (Section~\ref{sec:l3}) but not yet evaluated at scale.
+We describe the interface to L4~(persistent memory stores).
 
 \subsection{Related Work}
 \label{sec:related}
@@ -563,6 +568,29 @@ Two phantom tools are defined:
     round trip---faster and cheaper than a real Read tool call.
 \end{description}
 
+The second cooperative channel is \emph{cleanup tags}---structured
+directives embedded in the model's output text, parsed by the proxy
+before forwarding to the framework. Where phantom tools are
+proxy-to-model (the proxy offers capabilities), cleanup tags are
+model-to-proxy (the model initiates management). Four operations are
+defined:
+
+\begin{description}[nosep]
+  \item[\texttt{drop: block:ID}] Immediately evict a specific block.
+  \item[\texttt{summarize: block:ID "text"}] Replace a block with a
+    compact summary---lossy compression authored by the model, not
+    the system.
+  \item[\texttt{anchor: block:ID}] Pin a block against eviction.
+  \item[\texttt{collapse: turns N-M "text"}] Compress a range of
+    conversation turns into a single synthetic summary block,
+    removing all intermediate content.
+\end{description}
+
+The collapse operation is particularly significant: it enables L3
+compaction (Section~\ref{sec:l3}) initiated by the model itself,
+based on its understanding of which dialogue was scaffolding and
+which produced durable outcomes.
+
 The key insight: in hardware memory hierarchies, the application is
 adversarial or indifferent. The entire replacement algorithm
 literature assumes non-cooperation. Cooperative demand paging---where
@@ -570,7 +598,73 @@ the processor voluntarily releases cold pages and explicitly
 requests faults---is a new point in the design space, enabled by the
 fact that LLMs experience degraded output quality under context
 pressure and can learn that cooperation improves their own
-performance.
+performance. The two channels (phantom tools and cleanup tags)
+provide both directions of the cooperative protocol: the proxy
+informs the model of memory state, and the model directs the proxy
+to act on its cognitive assessment of what is cold.
+
+\subsection{Graduated Pressure Zones}
+\label{sec:pressure}
+
+The eviction policy must respond to context pressure, but a binary
+threshold (evict/don't-evict) is too coarse. \textsc{Pichay} defines
+four pressure zones based on token consumption:
+
+\begin{description}[nosep]
+  \item[Normal] ($< 60\text{K}$ tokens): No intervention. The proxy
+    observes and logs.
+  \item[Advisory] ($60\text{K}$--$100\text{K}$): The proxy injects
+    memory pressure information into the model's context---current
+    fill percentage, the five largest resident blocks, and available
+    cleanup operations. The model can act cooperatively or ignore the
+    advisory. This is the graduated equivalent of the ``low memory''
+    notification in desktop operating systems.
+  \item[Involuntary] ($100\text{K}$--$120\text{K}$): The proxy begins
+    automatic eviction using the FIFO age policy. The model is
+    informed but not consulted.
+  \item[Aggressive] ($\geq 120\text{K}$): Emergency eviction with
+    relaxed thresholds. Context survival takes priority over working
+    set preservation.
+\end{description}
+
+The advisory zone is the cooperative innovation. Rather than
+evicting silently (the OS approach) or crashing at capacity (the
+current agentic AI approach), the system provides the model with
+enough information to make intelligent cleanup decisions. The
+60K threshold was chosen to provide approximately 40K tokens of
+runway before involuntary eviction---enough for the model to
+complete a coherent thought and emit cleanup tags before losing
+agency over the process.
+
+\subsection{L3: Rolling Conversation Compaction}
+\label{sec:l3}
+
+The proxy manages tool results (L1/L2). Non-tool content---conversation
+history, planning dialogue, orientation reads---is managed by the
+collapse operation (Section~\ref{sec:cooperative}). This is L3 in the
+memory hierarchy: session history compressed with declared losses into
+structured summaries.
+
+The collapse operation \texttt{collapse: turns N-M "summary"} replaces
+all blocks in a contiguous turn range with a single synthetic block
+containing the model-authored summary. The original content is not
+stored---this is lossy compression by design. The summary captures
+\emph{outcomes} (what was decided, what was built, what failed) rather
+than \emph{process} (which files were read, what intermediate steps
+occurred).
+
+Block state persists across session restarts via atomic checkpointing.
+On each cleanup tag processing pass, the proxy serializes block metadata
+(IDs, content hashes, sizes, turns, roles, status, summaries) to a JSON
+checkpoint file using atomic write (tmp file + rename). On session
+creation, the checkpoint is loaded and block tracking resumes from the
+persisted state. Original content is lazily repopulated as the message
+array is reprocessed.
+
+The checkpoint is metadata-only---content is not persisted (the client's
+message array is the backing store). This keeps checkpoint files small
+(kilobytes, not megabytes) and avoids the consistency hazard of
+maintaining two copies of message content.
 
 % ====================================================================
 \section{Measurement}
@@ -1377,15 +1471,16 @@ absolute token counts vary.
 \section{Future Work}
 \label{sec:future}
 
-\paragraph{L3: Rolling conversation compaction.}
-The proxy currently manages only tool results. Non-tool messages
-(conversation history) are untouched. We propose compressing early
-conversation turns into structured summaries with \emph{declared
-losses}: explicit statements of what information was dropped during
-compression. This transforms opaque context truncation into honest,
-auditable compaction. The compressed segments function as L3 in the
-memory hierarchy---faultable by expanding the summary back to the
-original content from the client's backing store.
+\paragraph{L3 evaluation.}
+The collapse mechanism (Section~\ref{sec:l3}) is implemented but not
+yet evaluated at scale. Open questions include: how much context does
+model-authored compaction recover compared to system-initiated
+eviction? Do declared losses in collapse summaries enable accurate
+fault decisions (can the model determine from a summary alone whether
+it needs the original content)? What is the quality impact of
+replacing 20~turns of dialogue scaffolding with a single outcome
+sentence? These require longitudinal measurement across sessions of
+varying length and task complexity.
 
 \paragraph{Cost-aware eviction pressure.}
 The current eviction policy uses a space-based threshold (context
@@ -1499,6 +1594,9 @@ context windows. Demand paging with a simple FIFO policy recovers
 Fault-driven pinning eliminates thrashing of working-set content.
 Retrieval handles---designed as space-saving markers---function as
 late-binding anchors that models understand without instruction.
+Graduated pressure zones and cooperative cleanup tags give the model
+agency over its own memory management---a capability with no analogue
+in hardware memory hierarchies.
 
 The system requires no changes to models, clients, or inference
 APIs. It is implemented as a transparent proxy and deployed in
@@ -1508,9 +1606,11 @@ The deeper contribution is the architectural observation: LLM
 systems need not one large context window but a hierarchy of
 managed levels---from the generation window (L1) through persistent
 cross-session memory (L4)---connected by eviction policies and
-fault mechanisms. The first two levels are deployed and evaluated.
-The solutions for the remaining levels exist in the OS literature.
-What remains is to build them.
+fault mechanisms. The first three levels are deployed; the first
+two are evaluated. L3---model-initiated conversation compaction---is
+the newest mechanism, and its evaluation is ongoing. The solutions
+for the remaining level exist in the OS literature.
+What remains is to connect them.
 
 % ====================================================================
 \section*{Authorship and AI Contribution}
