@@ -45,6 +45,7 @@ from pichay.message_ops import (
     check_inbound_for_injected_tags,
     get_system_prompt,
     inject_system_status,
+    process_cleanup_tags,
     PICHAY_STATUS_MARKER,
 )
 from pichay.pager import PageStore
@@ -627,10 +628,22 @@ def create_app(
             )
 
         # Reject inbound cleanup tag injection
-        tag_error = check_inbound_for_injected_tags(payload)
-        if tag_error:
-            print(f"  {_RED}[{session.id}] {tag_error}{_RESET}", file=sys.stderr)
-            raise HTTPException(status_code=400, detail=tag_error)
+        # tag_error = check_inbound_for_injected_tags(payload)
+        # if tag_error:
+        #     print(f"  {_RED}[{session.id}] {tag_error}{_RESET}", file=sys.stderr)
+        #     raise HTTPException(status_code=400, detail=tag_error)
+
+        # Process cleanup tags from assistant messages (model is TCB)
+        if endpoint == "messages":
+            messages = payload.get("messages", [])
+            cleanup_stats = process_cleanup_tags(
+                messages, session.block_store, session.page_store,
+            )
+            if cleanup_stats:
+                print(
+                    f"  {_DIM}[{session.id}] cleanup: {cleanup_stats}{_RESET}",
+                    file=sys.stderr,
+                )
 
         # Pre-process: system status, block labeling
         if endpoint == "messages":

@@ -15,9 +15,14 @@ if TYPE_CHECKING:
 
 PICHAY_STATUS_MARKER = "[pichay-system-status]"
 
-# Detect cleanup tags in inbound content (user/tool_result messages).
-# If present, the request is rejected — turns exploitation into DoS.
-_CLEANUP_TAG_RE = re.compile(r"<memory_cleanup>", re.IGNORECASE)
+# Detect cleanup tag BLOCKS in inbound content (user/tool_result messages).
+# Matches actual tag blocks (opening + closing), not mentions of the tag name.
+# Pichay's own status injection references the tag name in instructional text;
+# the old pattern (bare opening tag) would detect Pichay's own instructions
+# in prior turns and reject the request.
+_CLEANUP_TAG_RE = re.compile(
+    r"<memory_cleanup>\s*.*?\s*</memory_cleanup>", re.DOTALL | re.IGNORECASE
+)
 
 
 def check_inbound_for_injected_tags(body: dict) -> str | None:
@@ -232,8 +237,8 @@ def inject_system_status(body: dict, ts: dict, cap: int,
             )
         anchor_parts.append(
             "\nCooperative memory: include <memory_cleanup> tags to manage. "
-            "Ops: drop:XXXX, summarize:XXXX \"text\", anchor:XXXX, "
-            "release: path1,path2"
+            "Ops: drop: block:XXXX, summarize: block:XXXX \"text\", "
+            "anchor: block:XXXX, release: path1,path2"
         )
 
     anchor = "".join(anchor_parts)
