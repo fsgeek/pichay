@@ -53,6 +53,30 @@ class PageEntry:
     turn_index: int
     turns_from_end: int
 
+    @property
+    def label(self) -> str:
+        """Compact label for yuyay-manifest XML, derived from summary."""
+        # summary format: "[tensor:HANDLE — DESCRIPTION (N bytes, M lines)]"
+        sep = " \u2014 "
+        if sep not in self.summary:
+            return self.tool_name
+        description = self.summary.split(sep, 1)[1]
+        # Strip trailing " (N bytes...)" parenthetical
+        if " (" in description:
+            description = description[: description.rfind(" (")]
+        tool = self.tool_name
+        if tool == "Read":
+            return description.split("/")[-1]
+        elif tool == "Grep":
+            return description[:30]
+        elif tool == "Bash":
+            cmd = description.lstrip("`").lstrip()
+            return cmd[:40]
+        elif tool == "Agent":
+            return "Agent"
+        else:
+            return description[:40]
+
 
 @dataclass
 class PageFault:

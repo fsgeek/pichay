@@ -21,6 +21,32 @@ def _escape_xml_attr(s: str) -> str:
     return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _label_for_entry(entry) -> str:
+    """Extract a compact label from an entry's summary and tool_name."""
+    summary = getattr(entry, "summary", "")
+    tool = getattr(entry, "tool_name", "")
+    sep = " \u2014 "
+    if sep not in summary:
+        return tool or "unknown"
+    description = summary.split(sep, 1)[1]
+    # Strip trailing " (N bytes...)" parenthetical
+    if " (" in description:
+        description = description[: description.rfind(" (")]
+    # Strip trailing "]"
+    description = description.rstrip("]")
+    if tool == "Read":
+        return description.split("/")[-1]
+    elif tool == "Grep":
+        return description[:30]
+    elif tool == "Bash":
+        cmd = description.lstrip("`").lstrip()
+        return cmd[:40]
+    elif tool == "Agent":
+        return "Agent"
+    else:
+        return description[:40]
+
+
 def _eviction_key_for_entry(entry) -> str | None:
     """Build eviction key from a PageEntry for release checking."""
     if entry.tool_name == "Read":
@@ -327,7 +353,7 @@ def inject_system_status(body: dict, ts: dict, cap: int,
                 f'    <tensor handle="{handle}" tool="{entry.tool_name}" '
                 f'size="{entry.original_size}" age_minutes="{age_min:.0f}" '
                 f'faults="{fault_count}" '
-                f'summary="{_escape_xml_attr(entry.summary[:120])}"/>'
+                f'label="{_escape_xml_attr(_label_for_entry(entry))}"/>'
             )
         if tensor_lines:
             manifest_parts = ["\n<yuyay-manifest>\n"]
