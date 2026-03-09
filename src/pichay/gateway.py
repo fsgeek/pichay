@@ -679,11 +679,23 @@ def create_app(
         because system prompt injection needs access to the system field
         directly.
         """
+        incoming_messages = payload.get("messages", [])
+
+        # Guard: don't forward turns with empty user content (injection-only turns)
+        if incoming_messages and incoming_messages[-1].get("role") == "user":
+            last_content = incoming_messages[-1].get("content", "")
+            if isinstance(last_content, str):
+                _is_empty = not last_content.strip()
+            elif isinstance(last_content, list):
+                _is_empty = len(last_content) == 0
+            else:
+                _is_empty = True
+            if _is_empty:
+                raise HTTPException(status_code=422, detail="Empty user turn — not forwarded to provider")
+
         session.increment_turn()
         ts = session.token_state
         request_time = datetime.now(timezone.utc)
-
-        incoming_messages = payload.get("messages", [])
         ps = session.page_store
         ms = session.message_store
 
