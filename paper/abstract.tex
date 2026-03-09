@@ -1,0 +1,34 @@
+\begin{abstract}
+The context window of a large language model is not memory. It is
+L1~cache---a small, fast, expensive resource that the field treats
+as the entire memory system. There is no L2, no virtual memory, no
+paging. Every tool definition, every system prompt, and every stale
+tool result occupies context for the lifetime of the session. The
+result is measurable: across 857~production sessions and
+4.45~billion effective input tokens, 21.8\% is structural waste.
+
+We present \textsc{Pichay}, a demand paging system for LLM context
+windows. Implemented as a transparent proxy between client and
+inference API, \textsc{Pichay} interposes on the message stream to
+evict stale content, detect page faults when the model re-requests
+evicted material, and pin working-set pages identified by fault
+history. In offline replay across 1.4~million simulated evictions,
+the fault rate is 0.0254\%. In live production deployment over
+681~turns, the system reduces context consumption by up to 93\%
+(5{,}038KB $\to$ 339KB); under extreme sustained pressure, the
+system remains operational but exhibits the expected thrashing
+pathology, with repeated fault-in of evicted content.
+
+The key observation is that the problems the field faces---context
+limits, attention degradation, cost scaling, lost state across
+sessions---are virtual memory problems wearing different clothes.
+The solutions exist: working set
+theory~\citep{denning1968working}, demand paging, fault-driven
+replacement policies, and memory hierarchies with multiple
+eviction-managed levels. We describe the architecture of a full
+memory hierarchy for LLM systems (L1~through persistent storage),
+report on the first three levels deployed in production use
+(L1~eviction, L2~fault-driven pinning, L3~model-initiated
+conversation compaction), and identify cross-session memory as the
+remaining frontier.
+\end{abstract}

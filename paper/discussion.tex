@@ -1,0 +1,342 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why This Waste Exists}
+
+The append-only pattern in agentic AI tools is not an implementation
+bug. It arises from four reinforcing factors:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Training data}: Models learn from conversations that
+    grow monotonically. No training examples demonstrate intelligent
+    content removal.
+  \item \textbf{API design}: The Messages API accepts a list of
+    messages. The natural operation on a list is append. The API
+    provides no mechanism for ``this content is stale.''
+  \item \textbf{Framework defaults}: Every orchestration framework
+    appends by default. Eviction requires explicit engineering.
+  \item \textbf{Invisible cost}: Token consumption is billed after
+    the fact. Quality degradation from context bloat is invisible
+    unless measured. There is no backpressure signal.
+\end{enumerate}
+
+\subsection{The Inverted Cost Model}
+\label{sec:inverted-cost}
+
+In traditional virtual memory, keeping a page in physical memory is
+free. RAM is allocated whether the page is accessed or not; the only
+cost is \emph{faulting}---the latency of disk I/O when a needed page
+is not resident. The entire replacement algorithm literature, from
+FIFO to LRU to Clock to Working Set, optimizes a single objective:
+\emph{minimize faults}.
+
+In LLM context management, the cost model is inverted. Every token
+kept in context costs money on every turn. A 5{,}000-token file
+sitting in context for 20~turns costs 100{,}000 input tokens of
+processing. Re-reading that file once when actually needed costs
+5{,}000 tokens. The eviction saves 95{,}000 tokens. Keeping is
+expensive; faulting is cheap.
+
+This inversion changes the optimization objective. The correct
+formulation is not ``minimize faults'' but:
+\[
+  \min \sum_{p \in P} \bigl[ C_{\text{keep}}(p) + C_{\text{fault}}(p) \bigr]
+\]
+where $C_{\text{keep}}(p) = |p| \cdot T_{\text{resident}}(p) \cdot
+c_{\text{token}}$ is the cumulative cost of keeping page $p$ resident
+for $T_{\text{resident}}$ turns, and $C_{\text{fault}}(p) = |p| \cdot
+c_{\text{token}}$ is the one-time cost of restoring the page (one
+turn of reprocessing). The break-even condition is:
+\[
+  |p| \cdot T_{\text{until\_next\_ref}}(p) \cdot c_{\text{token}} >
+  |p| \cdot c_{\text{token}}
+\]
+which simplifies to: \emph{evict whenever the page will not be
+referenced for more than one turn}. This is why FIFO works so well
+in our system despite being the worst-performing policy in classical
+VM: when keeping is expensive and faulting is cheap, aggressive
+eviction is correct by default. Sophistication in replacement policy
+is needed only to avoid evicting pages that will be needed on the
+\emph{very next} turn.
+
+\paragraph{Belady's MIN under inverted costs.}
+Belady's optimal algorithm~\citep{belady1966study} evicts the page
+whose next reference is farthest in the future, minimizing total
+faults. Under the inverted cost model, the optimal policy is
+different: it must minimize the sum of keeping costs and fault costs.
+A page with a distant next reference should be evicted immediately
+(saving many turns of keep cost at the price of one fault). A page
+referenced every turn should never be evicted (the fault cost equals
+one turn of keep cost, so eviction saves nothing). The optimal
+offline policy under inverted costs is not MIN---it is a
+cost-weighted variant where pages are evicted when their projected
+keep cost exceeds their fault cost, regardless of whether a fault
+will occur.
+
+This has a practical implication: the \emph{size} of the page matters
+for eviction priority in a way it does not in classical VM (where all
+pages are equal size). A 10{,}000-token file costs ten times as much
+per turn as a 1{,}000-token file. Large pages should be evicted
+eagerly unless access frequency justifies the keep cost.
+
+\paragraph{Non-linear fault cost.}
+The linear fault cost $C_{\text{fault}}(p) = |p| \cdot c_{\text{token}}$
+above is a simplification. Transformer inference is dominated by
+self-attention, which is $O(n^2)$ in sequence length. A page fault
+requires an additional full inference pass---the model emits a
+\texttt{tool\_use} for the recall handle, and the restored content
+returns as a \texttt{tool\_result} message that triggers a second
+inference over the entire context. The true fault cost is therefore
+proportional to $n^2$ at the current context size $n$, not to the
+page size $|p|$ alone.
+
+This produces a counter-intuitive policy gradient. At low fill
+(e.g., $n = 40\text{K}$), faults are cheap and aggressive eviction is
+correct---the quadratic cost of an extra pass is modest, and keeping
+the working set small reduces the $n^2$ base for all subsequent turns.
+At high fill (e.g., $n > 100\text{K}$), faults become expensive: the
+additional inference pass costs roughly $(n + |p|)^2 \approx n^2$
+tokens of compute. The eviction policy should therefore become
+\emph{more conservative} as context pressure rises---the opposite of
+the naive instinct to evict aggressively under pressure. At high
+fill, the system should evict only content it is highly confident will
+not be referenced again.
+
+\paragraph{Object-based cost variance.}
+Unlike classical VM, where all pages are fixed-size blocks (typically
+4\,KB), Pichay manages variable-size objects: a recalled tensor may be
+a 3-line summary or a 200-line file. This means eviction and fault
+costs vary by orders of magnitude across the working set. The
+replacement policy cannot treat all eviction candidates as equivalent;
+it must weight both the per-turn keep cost and the potential fault cost
+by object size. Combined with the quadratic fault penalty, this argues
+for a \emph{size-aware, fill-sensitive} replacement policy that has no
+direct analogue in the classical VM literature.
+
+\paragraph{Cache invalidation cost.}
+The cost model so far considers only token-level costs (keeping and
+faulting). Structural mutations---collapse operations that remove or
+replace blocks in the message array---have an additional cost:
+\emph{prompt cache invalidation}. Inference providers cache the
+tokenized prefix of repeated requests; when the prefix changes, the
+cache misses and the entire context must be reprocessed.
+
+In production, a collapse operation that compressed 12~turns of
+orientation dialogue into a single summary sentence caused the cache
+hit rate to drop from 100\% to 25\% for one turn, then recover to
+100\% on the following turn as the new prefix stabilized. The cost
+was one full recompute of $\sim$105K tokens---comparable to the
+cost of several page faults. A collapse that saves 10KB of context
+but invalidates a 100K-token cached prefix is a net loss unless the
+space savings persist for enough subsequent turns to amortize the
+one-time recompute.
+
+This argues for \emph{batching} structural mutations: accumulate
+collapse candidates and execute them together in a single pass,
+paying the cache invalidation cost once rather than per-operation.
+It also argues against frequent small collapses in favor of
+infrequent large ones.
+
+\paragraph{Pin decay.}
+The inverted cost model also argues against permanent pins. In our
+current design (Section~\ref{sec:pinning}), one fault pins a page
+permanently. But a fault tells us the content was needed \emph{then},
+not forever. Under the cost model, a pin should decay: its strength
+halves every $K$~turns since last access, and the page becomes
+evictable when the projected keep cost of the remaining pin lifetime
+exceeds the fault cost. This gives LRU-like behavior with
+cost-weighted decay, and prevents the monotonic working-set growth
+that permanent pinning causes in long sessions.
+
+\subsection{Generalizability}
+
+The waste patterns we measure are structural consequences of the
+agentic architecture:
+
+\begin{itemize}[nosep]
+  \item Any system that sends tool definitions on every request
+    will send schemas for unused tools. The specific percentage
+    depends on tool count and usage distribution, but the mechanism
+    is universal.
+  \item Any system that injects instructions into messages risks
+    duplication. Claude Code's triplication is egregious but not
+    unique.
+  \item Any system that keeps tool results in context for the
+    session lifetime will see amplification proportional to session
+    length.
+\end{itemize}
+
+Our empirical evidence is from one system (Claude Code) and one
+user. The structural argument is strong---the architecture
+forces the waste---but comparative measurement of other tools
+would strengthen the generalizability claim.
+
+\subsection{Scope, Non-Goals, and Threats to Validity}
+
+\paragraph{Scope.}
+This paper evaluates context waste and demand paging behavior for
+agentic coding workloads with persistent tool and transcript history.
+The target claim is mechanism-level: when requests repeatedly resend
+large static prefixes and stale tool output, eviction plus fault-based
+restoration reduces cumulative input processing.
+
+\paragraph{Non-goals.}
+We do not claim universal percentage reductions across all assistants,
+all model families, or all task domains. We do not evaluate frontier
+reasoning benchmarks, autonomous planning quality, or human preference
+at product scale. We also do not claim that L1 expansion (larger
+context windows) is obsolete; we claim it is incomplete without
+hierarchical management.
+
+\paragraph{Threats to validity.}
+External validity is limited by the single-user corpus and one primary
+assistant implementation. Internal validity risks include prompt drift,
+toolset changes across versions, and workload phase effects that alter
+hot-set composition. To mitigate drift, we report a frozen cohort for
+headline numbers and provide executable recount tooling plus
+timestamped live snapshot artifacts for auditability.
+
+\subsection{Quality: LLM-Judged Equivalence Check}
+\label{sec:quality}
+
+The intervention must not degrade output quality. We therefore run a
+paired equivalence-style check: if results are broadly comparable while
+compute drops, the intervention is useful.
+
+\paragraph{Protocol.}
+We select 18~sessions from the corpus (426--1{,}354~messages,
+340K--718K~characters of context). For each session, we construct
+paired contexts at 65--75\% of the conversation: the \emph{baseline}
+retains all messages; the \emph{treatment} replaces consumed tool
+results outside a 20-message recency window with tombstones, modeling
+\textsc{Pichay}'s eviction behavior. Both conditions receive the same
+continuation prompt (the next user message). Outputs are generated by
+Sonnet~4 under both conditions.
+
+An ensemble of three LLM judges (one Sonnet~4, two Haiku~4.5)
+evaluates each paired output on correctness, completeness, and
+coherence (1--5~scale). Judges also state a blind preference
+(A, B, or tie) and whether they can identify which output had
+reduced context. A/B assignment is randomized per judge to
+prevent position bias; scores are remapped to baseline/treatment
+before aggregation.
+
+\paragraph{Results.}
+
+\begin{table}[ht]
+\centering
+\caption{Non-inferiority evaluation: 18~sessions, 54~verdicts.
+  Treatment evicts consumed tool results outside a 20-message
+  recency window (mean compression 48\%).}
+\label{tab:noninferiority}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Metric} & \textbf{Baseline} & \textbf{Treatment} \\
+\midrule
+Judges preferring & 15 (28\%) & 20 (37\%) \\
+Ties & \multicolumn{2}{c}{19 (35\%)} \\
+\midrule
+Mean correctness & 3.89 & 3.74 \\
+Mean completeness & 3.59 & 3.59 \\
+Mean coherence & 3.74 & 3.69 \\
+Max score $\Delta$ & \multicolumn{2}{c}{0.15} \\
+\midrule
+Detection rate & \multicolumn{2}{c}{57\% ($p = 0.14$, n.s.)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Judges prefer the treatment \emph{more often} than the baseline
+(37\% vs.\ 28\%), with 35\% ties. Completeness scores are identical;
+correctness and coherence differ by at most 0.15~points on a 5-point
+scale. Detection rate (57\%) is not significantly above chance
+(binomial $z = 1.09$, $p = 0.14$, $n = 54$).
+
+\paragraph{Failure modes.}
+Two sessions (11\%) produced degenerate treatment outputs (zero
+characters): the continuation prompt implicitly referenced content
+that existed only in a tombstoned tool result. These are genuine
+eviction casualties. The failure pattern is specific: the user's
+prompt references a recently-consumed tool result by content rather
+than by name. A reference-aware eviction policy would detect such
+forward dependencies; the current heuristic (consumed + outside
+recency window = evictable) does not.
+
+\paragraph{The attention-concentration effect.}
+In several sessions, all three judges preferred the treatment output.
+Removing half the context did not merely preserve quality---it
+improved it. This is consistent with the attention-dilution hypothesis:
+transformer attention distributes weight across all tokens in context;
+irrelevant tokens (stale tool results, consumed intermediate outputs)
+dilute attention on the tokens that matter. Evicting them concentrates
+attention on signal. The effect is strongest in sessions with high
+tool-result density, where the evicted content is genuinely noise.
+We note this as preliminary evidence; establishing the effect
+rigorously would require controlled attention analysis with larger~$N$.
+
+\subsection{Compute and Energy Implications}
+\label{sec:energy}
+
+The 970~million tokens of addressable waste in our corpus have
+three compute cost dimensions:
+
+\paragraph{Input processing.}
+At a 93.5\% cache hit rate, most saved tokens are cache reads
+(907M tokens at reduced cost). However, 63M tokens are cache
+creation or uncached---full forward-pass computation that need not
+occur.
+
+\paragraph{Attention cost.}
+For every output token, the model computes attention over the full
+context. Removing 17{,}913 tokens from a mean context of 82{,}061
+reduces the per-output-token attention computation by 21.8\%.
+Across the corpus, this eliminates 85~billion token-token attention
+pairs.
+
+\paragraph{Throughput.}
+Each token in context requires KV cache memory. For large models,
+the per-token KV cache footprint is on the order of megabytes.
+Smaller context per request means less KV cache memory per request,
+which means more concurrent requests per GPU. A 21.8\% context
+reduction translates, to first approximation, to 21.8\% more
+concurrent users on the same GPU fleet.
+
+This is the argument that changes the infrastructure economics.
+The savings are not just ``less cost per request''---they are
+``more requests per machine,'' which is the difference between
+building new data centers and not building them.
+
+\paragraph{Compounding across sessions.}
+These per-call savings compound. Waste prevented on turn~$N$ is not
+merely saved once---it is absent from every subsequent turn's
+context, where it would have been reprocessed under $O(n^2)$
+attention cost. The total compute savings across a session are
+therefore superlinear in the waste fraction and grow with session
+length. For a 100-turn session with 21.8\% addressable waste, the
+cumulative attention savings are not 21.8\% of total session
+compute---they are substantially larger, because the quadratic cost
+of carrying unnecessary tokens compounds on every subsequent call.
+The infrastructure implication follows directly: the fastest tokens
+are the ones you never process.
+
+Figure~\ref{fig:cumulative-cost} illustrates this compounding on an
+88-turn live session running through \textsc{Pichay}. Cumulative
+baseline cost (processing all context every turn) reaches 8.6M~input
+tokens; managed cost reaches 4.8M---a 45\% cumulative reduction,
+substantially larger than the per-turn compression ratio, because
+each evicted token is absent from \emph{every subsequent turn}.
+
+\input{figures/cumulative_cost}
+
+\paragraph{Fleet-scale extrapolation.}
+Our corpus represents one user over four months. A fleet-wide
+projection requires per-user token consumption data that inference
+providers hold but have not published. The extrapolation framework
+is straightforward: $N$ users $\times$ 970M tokens per user $=$
+total addressable waste. The mechanism (tool schema waste, content
+duplication, result amplification) is architectural, so the
+per-user waste fraction should be relatively stable even if
+absolute token counts vary.
+
+% ====================================================================

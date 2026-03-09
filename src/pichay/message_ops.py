@@ -323,10 +323,8 @@ def inject_system_status(body: dict, ts: dict, cap: int,
     if not messages or effective <= 0:
         return
 
-    local_time_str = request_time.astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
     anchor_parts = [
         f"\n[pichay-live-status] "
-        f"Time: {local_time_str} | "
         f"Context: {effective:,}/{context_limit:,} tok ({pct:.0f}%) | "
         f"Pressure: {pressure} | "
         f"Hard cap: {hard_cap:,} tok"

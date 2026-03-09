@@ -1,0 +1,37 @@
+\section{Conclusion}
+
+The context window of a large language model is not memory. It is
+L1~cache---a small, fast, expensive level in what should be a
+managed hierarchy. The field treats it as the entire memory system.
+There is no L2, no paging, no eviction policy, no working set
+estimation. The result: 21.8\% structural waste in 4.45~billion
+measured tokens, with the model reprocessing stale content at
+84.4$\times$ amplification.
+
+\textsc{Pichay} demonstrates that the virtual memory abstractions
+developed for physical memory in the 1960s apply directly to LLM
+context windows. Demand paging with a simple FIFO policy recovers
+36~percentage points of context capacity in steady-state use.
+Fault-driven pinning reduces repeated faults on working-set content in
+steady-state use.
+Retrieval handles---designed as space-saving markers---function as
+late-binding anchors that models understand without instruction.
+Graduated pressure zones and cooperative cleanup tags give the model
+agency over its own memory management---a capability with no analogue
+in hardware memory hierarchies.
+
+The system requires no changes to models, clients, or inference
+APIs. It is implemented as a transparent proxy and deployed in
+production use. The paper you are reading was written through it.
+
+The deeper contribution is the architectural observation: LLM
+systems need not one large context window but a hierarchy of
+managed levels---from the generation window (L1) through persistent
+cross-session memory (L4)---connected by eviction policies and
+fault mechanisms. The first three levels are deployed; the first
+two are evaluated. L3---model-initiated conversation compaction---is
+the newest mechanism, and its evaluation is ongoing. The solutions
+for the remaining level exist in the OS literature.
+What remains is to connect them.
+
+% ====================================================================

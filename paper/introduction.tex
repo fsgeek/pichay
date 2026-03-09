@@ -1,0 +1,97 @@
+\section{Introduction}
+\label{sec:intro}
+
+In 1961, the Atlas computer introduced demand paging: programs could
+address more memory than physically existed, and the hardware would
+transparently load pages from backing store as
+needed~\citep{kilburn1962one}. Before Atlas, programmers manually
+managed overlays---explicitly swapping code segments in and out of a
+fixed address space. The transition from overlays to virtual memory
+is one of the foundational advances in systems architecture.
+
+Large language model context windows are in the overlay era. Every
+agentic AI tool---Claude Code, Cursor, GitHub Copilot,
+Windsurf---manually assembles context on every API call: tool
+definitions, system prompts, and the complete message history. There
+is no eviction policy, no demand loading, no working set estimation.
+The default behavior is accumulation until the context limit forces
+a crisis.
+
+This paper makes two contributions. First, we provide the empirical
+evidence that context management is a memory management problem. We
+instrument 857~production sessions (54{,}170 API calls,
+4.45~billion effective input tokens) and find that 21.8\% of tokens
+are structural waste from three sources: unused tool schemas
+(11.0\%), duplicated content (2.2\%), and stale tool results (8.7\%)
+reprocessed at a median amplification of 84.4$\times$. These are
+not implementation bugs. They are the inevitable consequence of
+managing a finite resource (the context window) without the
+abstractions that operating systems developed for the analogous
+problem fifty years ago.
+
+Second, we build the system. \textsc{Pichay} is a demand paging
+system for LLM context windows, implemented as a transparent proxy
+between client and inference API. It distinguishes garbage collection
+(removing ephemeral tool output that cannot be re-requested) from
+paging (evicting addressable content that can be faulted back in).
+It detects page faults when the model re-requests evicted content.
+It pins working-set pages identified by fault history. And the
+eviction summaries it generates---designed as space-saving
+markers---function as retrieval handles that models understand
+without instruction: ``\texttt{[Paged out: Read file.py (8,192
+bytes). Re-read if needed.]}''
+
+In production deployment, the system extends a session from 7\%
+free context to 43\% free---the difference between imminent context
+death and substantial remaining capacity. Over a 681-turn session,
+it sustains operation at 97\% eviction rate, though this extreme
+case reveals the thrashing pathology well-known from OS
+research~\citep{denning1968working}: when the working set exceeds
+the resident set, the system spends more effort on faulting than on
+useful work.
+
+The deeper observation is that the context window is not memory. It
+is L1~cache. And nobody is building the rest of the hierarchy.
+The field's response to context limits is to make L1 bigger---1M
+token windows, 10M token windows. This is the equivalent of building
+machines with more physical RAM instead of inventing virtual memory.
+It works, but it doesn't scale, and it misses the architectural
+insight: a managed hierarchy of small-fast-expensive and
+large-slow-cheap storage, connected by eviction policies and fault
+mechanisms, outperforms any single level no matter how large.
+
+We describe the full hierarchy: L1~(the generation window), L2~(the
+working set, demand-paged and pinned), L3~(session history,
+compressed with declared losses), and L4~(cross-session persistent
+memory, indexed and retrievable). The first two levels are deployed
+and evaluated. L3~is implemented---the model can compress conversation
+turns into outcome summaries via cooperative cleanup tags---but not
+yet evaluated at scale. L4~is designed and its mechanisms identified.
+
+The contributions:
+\begin{enumerate}
+  \item A large-scale empirical characterization of context
+    window utilization in a production agentic AI corpus, establishing that
+    21.8\% of tokens are structural waste with a measured taxonomy.
+  \item \textsc{Pichay}, a demand paging system for LLM context
+    windows with empirically measured fault rate (0.0254\% offline,
+    deployed in production).
+  \item Fault-driven pinning: a page replacement policy that
+    learns from its own mistakes---one fault pins a page for the
+    session, reducing repeated faults in steady-state workloads.
+  \item Cooperative memory management via two side channels
+    (phantom tools and cleanup tags): mechanisms enabling the model
+    to voluntarily release cold pages, request cached faults, and
+    compress conversation history---a new point in the design space
+    not available in hardware memory hierarchies, where applications
+    are non-cooperative.
+  \item The architectural observation that LLM context management
+    maps structurally (not merely metaphorically) to virtual memory,
+    and that the full OS memory hierarchy---from cache replacement
+    policies to working set theory---applies directly.
+  \item Design of a four-level memory hierarchy for LLM systems,
+    with the first three levels deployed (L1~eviction, L2~pinning,
+    L3~cooperative compaction) and the first two evaluated.
+\end{enumerate}
+
+% ====================================================================

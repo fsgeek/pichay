@@ -2,7 +2,7 @@
 
 Research code and paper artifacts for demand paging in LLM context windows.
 
-## Gateway (v1)
+## Gateway
 
 `pichay` now starts the multi-provider gateway CLI.
 
@@ -26,15 +26,33 @@ Observability endpoints:
 - `GET /api/events?window=24h`
 - `GET /dashboard` (live browser UI)
 
-## Reproduce Paper Counts (5 Minutes)
+## Reproduce Paper Artifact (Recommended)
+
+Run from repository root:
+
+```bash
+bash paper/reproduce_paper.sh
+```
+
+This performs:
+- dependency sync
+- figure regeneration (`paper/figures/cost_model.py`)
+- strict headline-number check against latest snapshot (if present)
+- clean LaTeX rebuild of `paper/main.pdf`
+
+Detailed guide:
+- `paper/PAPER_ARTIFACT.md`
+
+## Reproduce/Refresh Paper Counts
 
 Run from repository root:
 
 ```bash
 ./tools/reproduce_paper_counts.sh
-python3 tools/check_paper_numbers.py \
+uv run python tools/check_paper_numbers.py \
   --paper paper/main.tex \
-  --snapshot paper/data/corpus_snapshot_20260307_live.json
+  --snapshot paper/data/corpus_snapshot_YYYYMMDD_live.json \
+  --strict
 ```
 
 What this does:
@@ -51,7 +69,7 @@ Reference protocol:
 ## Build Paper
 
 ```bash
-latexmk -pdf paper/main.tex
+bash paper/reproduce_paper.sh
 ```
 
 Output:

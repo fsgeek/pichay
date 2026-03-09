@@ -1,0 +1,50 @@
+\appendix
+\section{Data Snapshot and Counting Protocol}
+\label{sec:appendix-protocol}
+
+To keep counts reproducible as the live corpora evolve, we separate
+paper numbers (frozen cohort for this draft) from live recounts.
+The counting protocol is versioned in the repository:
+\texttt{docs/corpus\_protocol.md}.
+
+\paragraph{Counting tool.}
+Session counting is performed by
+\texttt{tools/corpus\_counts.py}, which classifies Claude Code JSONL
+files into \texttt{main}, \texttt{subagent}, \texttt{compact},
+\texttt{prompt\_suggestion}, and \texttt{other}, and reports both
+raw and content-hash-deduplicated totals.
+
+\paragraph{Recount command.}
+\begin{verbatim}
+./tools/reproduce_paper_counts.sh
+\end{verbatim}
+This writes a timestamped snapshot JSON to
+\texttt{paper/data/corpus\_snapshot\_YYYYMMDD\_live.json}.
+
+\paragraph{5-minute reproduction path.}
+From repository root:
+\begin{verbatim}
+./tools/reproduce_paper_counts.sh
+python3 tools/check_paper_numbers.py \
+  --paper paper/main.tex \
+  --snapshot paper/data/corpus_snapshot_20260307_live.json
+latexmk -pdf paper/main.tex
+\end{verbatim}
+Expected outputs: (1) a new snapshot JSON under \texttt{paper/data/},
+(2) a paper-number consistency report, and (3) \texttt{paper/main.pdf}.
+On a typical laptop this path completes in minutes; the recount step is
+I/O-bound on local corpus size.
+
+\paragraph{Current live recount artifact (2026-03-07).}
+\texttt{paper/data/corpus\_snapshot\_20260307\_live.json}
+with roots:
+\texttt{\~/.claude/projects} and
+\texttt{\~/projects/yanantin/tmp/ubuntu-vm.claude/projects},
+size filter \texttt{min\_size=10000}, and Claude Desktop summary
+from \texttt{\~/projects/yanantin/tmp/claude-desktop/conversations.json}.
+
+For this paper version, headline results use a frozen cohort to
+avoid drift across revisions; live recount artifacts are provided for
+auditability.
+
+% ====================================================================

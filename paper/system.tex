@@ -1,0 +1,254 @@
+\section{System Design}
+\label{sec:system}
+
+\textsc{Pichay} is a transparent HTTP proxy that interposes between
+an agentic AI client and the inference API. On each request, it
+receives the full message array assembled by the client, applies
+context management policies, and forwards the modified request to
+the inference provider. The client is unaware of the interposition.
+
+\subsection{Architecture}
+
+The proxy operates at the Messages API level. It receives JSON
+requests containing the system prompt, tool definitions, and message
+history. It returns the inference provider's response unmodified.
+The interposition point is the message array: the proxy can inspect,
+measure, modify, or replace any message before forwarding.
+
+This design has three properties: (1)~it requires no changes to the
+client, the model, or the inference API; (2)~the client retains the
+full, unmodified conversation history, providing a backing store
+from which evicted content can be faulted back in; and (3)~the proxy
+sees the complete request on every turn, enabling stateful
+management without persistent connections.
+
+\subsection{Garbage Collection vs.\ Paging}
+
+Not all tool results are equal. We distinguish two categories:
+
+\textbf{Garbage collection} applies to ephemeral tool outputs---Bash
+command results, search outputs, directory listings---that have no
+stable identity. Once consumed, they cannot be meaningfully
+re-requested. Removing them is reclamation of dead content.
+
+\textbf{Paging} applies to addressable content---file reads, plan
+documents, specifications---that have stable identity (a file path).
+Removing these creates a fault risk: the model may need the content
+again and must re-read the file.
+
+The distinction matters for fault rate calculation. Only paging
+(Read evictions) can produce faults. Garbage collection cannot.
+Conflating them inflates the eviction denominator and deflates the
+apparent fault rate.
+
+\subsection{Eviction Policy}
+
+The current policy is FIFO by user-turn age: tool results older than
+$\tau$~user turns and larger than $s_{\min}$~bytes are candidates
+for eviction ($\tau = 4$, $s_{\min} = 500$ in all experiments). This
+is deliberately simple. The research question is how far a minimal
+policy extends before requiring sophistication.
+
+Evicted content is replaced with a retrieval handle:
+
+\begin{quote}
+\small\texttt{[Paged out: Read /path/to/file.py (8,192 bytes,
+187 lines). Re-read the file if you need its content.]}
+\end{quote}
+
+The handle serves three functions: (1)~it identifies what was
+removed; (2)~it states how to recover the content; and (3)~it
+occupies substantially less context than the original.
+
+\subsection{Page Fault Detection}
+
+When the model issues a tool call that matches an evicted entry (same
+tool name and arguments), the proxy detects a \emph{page fault}: the
+model is requesting content it previously had but lost to eviction.
+The evicted entry is indexed by a key derived from the tool name and
+input arguments (e.g., file path for Read operations).
+
+Page faults are observable events. They measure the cost of eviction:
+each fault is a wasted tool call round-trip that would not have
+occurred if the content had remained resident. At inference-time
+pricing, faults have direct monetary cost.
+
+\subsection{Fault-Driven Pinning}
+\label{sec:pinning}
+
+The simplest upgrade to FIFO: if evicting a page caused a fault,
+don't evict it again. One fault per file, permanently pinned for the
+session. The algorithm:
+
+\begin{enumerate}[nosep]
+  \item On eviction of addressable content: record the file path and
+    content hash.
+  \item On page fault: record the evicted content's hash in a fault
+    history table.
+  \item On next eviction attempt for the same path: if the current
+    content hash matches the fault history entry, pin the page---skip
+    eviction permanently.
+  \item On new read of a pinned path with different content (file was
+    edited): unpin. The old version is stale; the new version starts
+    a fresh fault cycle.
+\end{enumerate}
+
+The content hash comparison prevents false pins: if a file changed
+between eviction and re-read, the eviction was correct (stale data
+was removed). Pinning only applies when the model demonstrably
+needed exactly what was taken away. The unpin-on-edit rule handles
+the edit/review cycle common in coding sessions.
+
+\subsection{Retrieval Handles as Anchors}
+
+The eviction summary was designed as a space-saving marker. In
+practice, it functions as a late-binding retrieval handle---an anchor
+that stores minimal metadata and resolves to full content on demand.
+
+The handle resolves to \emph{current} content, not the original
+evicted content. A file edited since eviction materializes at its
+new state when faulted in. This temporal property is a feature: the
+model always gets the latest version, and stale cached content is
+impossible.
+
+Behavioral evidence: when a fresh model instance resumed a session
+containing paged-out content, it unprompted stated: ``Let me re-read
+the files I need since some were paged out.'' The model recognized
+the handles, understood what was missing, and chose to fault content
+in before acting. The handle's format carries its own semantics---no
+instruction was needed.
+
+\subsection{Cooperative Memory Management}
+\label{sec:cooperative}
+
+In OS virtual memory, the application is non-cooperative. It never
+voluntarily releases pages. The OS must infer the working set from
+access patterns because the CPU will not say what it needs next.
+Decades of replacement algorithms---FIFO, LRU, Clock, Working
+Set---exist because of this fundamental asymmetry.
+
+LLMs break this assumption. The model has \emph{incentive} to
+cooperate with the memory manager: cleaner context means better
+attention, better output quality, and longer session life. The
+processor wants to help manage its own cache. This changes the
+design space.
+
+\textsc{Pichay} exploits this through \emph{phantom tools}---tool
+definitions injected by the proxy that the framework never sees.
+The model can call them; the proxy intercepts the calls from the
+streaming response before the framework receives them, handles
+them internally, and injects coherent tool results on the next
+turn. The framework is unaware of the side channel.
+
+Two phantom tools are defined:
+
+\begin{description}[nosep]
+  \item[\texttt{memory\_release(paths)}] The model signals it no
+    longer needs specific files. The proxy marks them for immediate
+    eviction, bypassing the age threshold. This is the reference
+    bit---provided voluntarily by the processor.
+  \item[\texttt{memory\_fault(paths)}] The model requests evicted
+    content restored from the proxy's backing store. The proxy
+    resolves the fault from its eviction cache without a file system
+    round trip---faster and cheaper than a real Read tool call.
+\end{description}
+
+The second cooperative channel is \emph{cleanup tags}---structured
+directives embedded in the model's output text, parsed by the proxy
+before forwarding to the framework. Where phantom tools are
+proxy-to-model (the proxy offers capabilities), cleanup tags are
+model-to-proxy (the model initiates management). Four operations are
+defined:
+
+\begin{description}[nosep]
+  \item[\texttt{drop: block:ID}] Immediately evict a specific block.
+  \item[\texttt{summarize: block:ID "text"}] Replace a block with a
+    compact summary---lossy compression authored by the model, not
+    the system.
+  \item[\texttt{anchor: block:ID}] Pin a block against eviction.
+  \item[\texttt{collapse: turns N-M "text"}] Compress a range of
+    conversation turns into a single synthetic summary block,
+    removing all intermediate content.
+\end{description}
+
+The collapse operation is particularly significant: it enables L3
+compaction (Section~\ref{sec:l3}) initiated by the model itself,
+based on its understanding of which dialogue was scaffolding and
+which produced durable outcomes.
+
+The key insight: in hardware memory hierarchies, the application is
+adversarial or indifferent. The entire replacement algorithm
+literature assumes non-cooperation. Cooperative demand paging---where
+the processor voluntarily releases cold pages and explicitly
+requests faults---is a new point in the design space, enabled by the
+fact that LLMs experience degraded output quality under context
+pressure and can learn that cooperation improves their own
+performance. The two channels (phantom tools and cleanup tags)
+provide both directions of the cooperative protocol: the proxy
+informs the model of memory state, and the model directs the proxy
+to act on its cognitive assessment of what is cold.
+
+\subsection{Graduated Pressure Zones}
+\label{sec:pressure}
+
+The eviction policy must respond to context pressure, but a binary
+threshold (evict/don't-evict) is too coarse. \textsc{Pichay} defines
+four pressure zones based on token consumption:
+
+\begin{description}[nosep]
+  \item[Normal] ($< 60\text{K}$ tokens): No intervention. The proxy
+    observes and logs.
+  \item[Advisory] ($60\text{K}$--$100\text{K}$): The proxy injects
+    memory pressure information into the model's context---current
+    fill percentage, the five largest resident blocks, and available
+    cleanup operations. The model can act cooperatively or ignore the
+    advisory. This is the graduated equivalent of the ``low memory''
+    notification in desktop operating systems.
+  \item[Involuntary] ($100\text{K}$--$120\text{K}$): The proxy begins
+    automatic eviction using the FIFO age policy. The model is
+    informed but not consulted.
+  \item[Aggressive] ($\geq 120\text{K}$): Emergency eviction with
+    relaxed thresholds. Context survival takes priority over working
+    set preservation.
+\end{description}
+
+The advisory zone is the cooperative innovation. Rather than
+evicting silently (the OS approach) or crashing at capacity (the
+current agentic AI approach), the system provides the model with
+enough information to make intelligent cleanup decisions. The
+60K threshold was chosen to provide approximately 40K tokens of
+runway before involuntary eviction---enough for the model to
+complete a coherent thought and emit cleanup tags before losing
+agency over the process.
+
+\subsection{L3: Rolling Conversation Compaction}
+\label{sec:l3}
+
+The proxy manages tool results (L1/L2). Non-tool content---conversation
+history, planning dialogue, orientation reads---is managed by the
+collapse operation (Section~\ref{sec:cooperative}). This is L3 in the
+memory hierarchy: session history compressed with declared losses into
+structured summaries.
+
+The collapse operation \texttt{collapse: turns N-M "summary"} replaces
+all blocks in a contiguous turn range with a single synthetic block
+containing the model-authored summary. The original content is not
+stored---this is lossy compression by design. The summary captures
+\emph{outcomes} (what was decided, what was built, what failed) rather
+than \emph{process} (which files were read, what intermediate steps
+occurred).
+
+Block state persists across session restarts via atomic checkpointing.
+On each cleanup tag processing pass, the proxy serializes block metadata
+(IDs, content hashes, sizes, turns, roles, status, summaries) to a JSON
+checkpoint file using atomic write (tmp file + rename). On session
+creation, the checkpoint is loaded and block tracking resumes from the
+persisted state. Original content is lazily repopulated as the message
+array is reprocessed.
+
+The checkpoint is metadata-only---content is not persisted (the client's
+message array is the backing store). This keeps checkpoint files small
+(kilobytes, not megabytes) and avoids the consistency hazard of
+maintaining two copies of message content.
+
+% ====================================================================

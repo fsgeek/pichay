@@ -1,0 +1,93 @@
+\section{Measurement}
+\label{sec:methodology}
+
+\subsection{Corpus}
+\label{sec:corpus}
+
+We instrument Claude Code, Anthropic's AI coding assistant, across
+a single power user's sessions over approximately four months
+(November 2025 through March 2026). The corpus comprises 857
+sessions across 15 software projects, drawn from two sources:
+a local WSL environment and an Ubuntu VM (migrated from a prior
+machine).
+
+Sessions are classified by type:
+\begin{itemize}[nosep]
+  \item \textbf{Main sessions} (59): Human-facing conversations
+    where the user interacts directly with the assistant.
+  \item \textbf{Subagent sessions} (567): Delegated tasks spawned
+    by the main session to handle subtasks in parallel.
+  \item \textbf{Compact sessions} (154): Context compaction
+    continuations triggered when the main session approaches
+    its context limit (the client automatically summarizes
+    conversation history to stay within the context window).
+  \item \textbf{Prompt suggestion sessions} (21): Short sessions
+    for generating prompt suggestions.
+\end{itemize}
+
+The corpus represents 54{,}170 API calls and 4.45~billion effective
+input tokens (input tokens + cache creation + cache read tokens).
+Token usage is extracted from the API response metadata embedded in
+session transcripts.
+
+Because the live corpora continue to evolve, the paper reports a
+frozen cohort (857 sessions) rather than a moving live count. We
+provide a recount script (\texttt{tools/corpus\_counts.py}) to make
+the counting boundary and dedup assumptions explicit.
+Unless stated otherwise, all corpus tables and figures in this draft
+use the frozen cohort with a fixed counting protocol
+(\texttt{dedup\_by\_content}, \texttt{min\_size=10000}) so results are
+stable across revisions.
+
+\paragraph{Bias declaration.}
+This is a single-user corpus from a power user who regularly
+exhausts context windows across complex, multi-file engineering
+tasks. We argue this is representative of the class where context
+management matters most, and note that Pareto-distributed usage
+means this class likely dominates total fleet token consumption.
+Multi-user validation is identified as future work.
+
+\subsection{Instruments}
+
+We develop three instruments at different layers of the stack:
+
+\paragraph{Probe} (\texttt{probe.py}): A streaming JSONL analyzer
+that reads Claude Code's raw session transcripts. Classifies records
+by type (user, assistant, tool\_result, progress), measures content
+sizes, tracks tool usage, and computes per-session metrics including
+amplification factor and tool overhead ratio. Requires no API calls;
+operates on existing session files.
+
+\paragraph{Proxy} (\texttt{proxy.py}): A transparent HTTP proxy
+deployed between Claude Code and the Anthropic API. Intercepts
+every request, capturing system prompts, tool definitions, message
+arrays, and token usage. Optionally applies interventions (eviction,
+trimming) before forwarding. Logs all decisions to JSONL for offline
+analysis. This is the ``MMU'' in our analogy.
+
+\paragraph{Experiment runner} (\texttt{pichay}): An experiment
+framework that orchestrates paired runs under different treatment
+conditions (baseline, trimmed, compact+trim), captures all
+artifacts (proxy logs, session data, git state, test results),
+and computes comparative metrics. The framework is self-bootstrapping:
+it was built by Claude Code running through its own proxy, with
+each round's logs feeding the next round's analysis.
+
+\subsection{Treatment Conditions}
+
+We define three treatment conditions applied at the proxy layer:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Baseline}: Proxy in observation mode. Logs all
+    traffic without mutation.
+  \item \textbf{Trimmed}: Tool definition stubbing and skill
+    deduplication applied to each request before forwarding.
+  \item \textbf{Compact+Trim}: Stale result eviction (paging)
+    combined with trimming.
+\end{enumerate}
+
+All treatments use the same model (Claude Opus), same temperature,
+and same task prompts. The proxy's interposition is transparent to
+both the client and the API---neither is aware of the mutations.
+
+% ====================================================================

@@ -1,0 +1,109 @@
+\section{Future Work}
+\label{sec:future}
+
+\paragraph{L3 evaluation.}
+The collapse mechanism (Section~\ref{sec:l3}) is implemented but not
+yet evaluated at scale. Open questions include: how much context does
+model-authored compaction recover compared to system-initiated
+eviction? Do declared losses in collapse summaries enable accurate
+fault decisions (can the model determine from a summary alone whether
+it needs the original content)? What is the quality impact of
+replacing 20~turns of dialogue scaffolding with a single outcome
+sentence? These require longitudinal measurement across sessions of
+varying length and task complexity.
+
+\paragraph{Cost-aware eviction pressure.}
+The current eviction policy uses a space-based threshold (context
+window capacity). The inverted cost model argues for cost-based
+pressure: 23\% memory pressure sounds low, but 45{,}000 tokens per
+turn at inference pricing is real money. Eviction pressure should be
+denominated in token-turns (the product of page size and projected
+remaining lifetime), not in fractional capacity. This reframes
+eviction from ``are we running out of space?'' to ``is this page
+earning its keep?''
+
+\paragraph{Cost-weighted pin decay.}
+Pinned pages should not remain resident forever. A fault tells us
+the content was needed \emph{then}, not forever. We propose
+cost-weighted decay: pin strength halves every $K$~turns since last
+access. A page becomes evictable when its projected keep cost exceeds
+its fault cost. Under low memory pressure, this is permissive
+(pins persist). Under high pressure, cold pins are released first.
+This gives LRU-like behavior with cost weighting, and prevents the
+monotonic working-set growth that permanent pinning causes in long
+sessions.
+
+\paragraph{Phase-aware eviction.}
+Planning and execution have different working set characteristics.
+Planning requires broad simultaneous context (many files held at
+once); execution is sequential (read, edit, move on). The proxy
+could detect phase from request patterns---many Reads with no Edits
+suggests planning---and adjust the eviction threshold accordingly.
+
+\paragraph{Per-connection isolation.}
+The current implementation uses a single PageStore for all
+connections. Subagent sessions share eviction state with the main
+session, causing cross-contamination. Per-connection isolation would
+give each session its own eviction history, fault tracking, and
+pinning state.
+
+\paragraph{Trace-driven simulation.}
+We extract reference strings (the sequence of page accesses) from
+session transcripts and replay them under different replacement
+policies. This enables evaluation of policies against recorded
+workloads without live inference-priced experiments. The inverted cost
+model (Section~\ref{sec:inverted-cost}) means the optimal offline
+policy is not Belady's MIN but a cost-weighted variant that minimizes
+total keep cost plus fault cost. We plan to derive and evaluate this
+cost-optimal offline bound alongside MIN for comparison.
+
+\paragraph{Cross-session access pattern prediction.}
+The break-even formula requires estimating $T_{\text{until\_next\_ref}}$---the
+number of turns until a page is next referenced. Within a single
+session, this can only be estimated from local patterns. Across
+sessions, the prediction becomes tractable: coding sessions exhibit
+regular access patterns (orientation reads of project structure,
+iterative edits of a working file, periodic reference to configuration).
+A Markov model trained on cross-session reference strings could
+predict re-reference probability per page per turn, enabling
+cost-optimal eviction decisions. The data collection is nearly free:
+the proxy already logs every eviction, every fault, every tool call.
+What is needed is a persistent, queryable store of access patterns
+that survives session boundaries---precisely the role of a cross-session
+memory system.
+
+\paragraph{Cooperative extensions.}
+Phantom tools open a side-channel between the model and the proxy.
+The current vocabulary---release and fault---is minimal. Extensions
+include: \emph{prefetch hints} (model signals upcoming working set
+needs), \emph{eviction classes} (groups of pages evicted as a unit),
+\emph{variable-fidelity tombstones} (AST skeletons instead of bare
+path markers), and \emph{ephemeral flags} (tool results marked for
+immediate eviction after extraction). Each expands the model's
+ability to communicate cognitive state to the memory manager.
+
+\paragraph{Beyond paging: object-addressed memory.}
+The current system manages fixed-granularity pages addressed by file
+path. But the natural unit for LLM memory management is the semantic
+object---a conversation phase, a design decision, a debugging session.
+These objects vary in size, have relationships to each other, and can
+be compressed to multiple fidelity levels rather than the binary
+resident/evicted state of hardware pages. The eviction tombstone
+becomes a compressed summary that functions as both a page table
+entry (retrieval handle to the backing store) and a cache line
+(enough semantic content to answer queries without faulting).
+Declared losses in the summary tell the model what it \emph{cannot}
+answer from the summary alone, guiding the decision to fault.
+The backing store is queryable---the model can ask a question of
+evicted content without materializing it in full. This shifts the
+abstraction from block-addressed paging to object-addressed memory
+management, where eviction is cooperative, compression is authored,
+and the backing store is a database rather than a swap partition.
+
+\paragraph{Comparative measurement.}
+Instrument other agentic tools (Cursor, Copilot, Windsurf,
+Continue.dev) to measure the same metrics. The structural argument
+predicts similar waste profiles; empirical confirmation would
+strengthen generalizability.
+
+% ====================================================================

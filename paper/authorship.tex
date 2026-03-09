@@ -1,0 +1,23 @@
+\section*{Authorship and AI Contribution}
+\label{sec:authorship}
+
+This paper was co-authored by a human systems researcher and an AI
+system (Claude Opus, Anthropic). The human contributed the memory
+hierarchy insight, research direction, experimental design, and
+editorial judgment---including the observation that context
+management is memory management, which reframed the entire project.
+The AI contributed code (analysis tools, proxy implementation,
+paging system), data analysis, and paper drafting.
+
+\textsc{Pichay} was built by the system being studied---Claude Code
+running through its own proxy---and the paper was written through it.
+The evaluation data in Section~\ref{sec:production} was generated as
+a side effect of the system's own development. We consider this
+self-referentiality a feature: the system's ability to measure,
+optimize, and sustain its own context usage over hundreds of turns is
+the strongest evidence that the interventions are practical.
+
+All instruments and data are open source:
+\url{https://github.com/fsgeek/pichay}.
+
+% ====================================================================

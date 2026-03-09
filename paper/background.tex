@@ -1,0 +1,226 @@
+\section{Background}
+\label{sec:background}
+
+\subsection{Agentic AI Architecture}
+
+Modern AI coding assistants operate as agentic systems: the model
+receives a set of tool definitions (JSON schemas describing available
+operations), a system prompt (identity, instructions, behavioral
+constraints), and a growing message history (alternating user and
+assistant turns including tool invocations and their results).
+
+On each API call, the client application assembles the full context:
+system prompt, tool definitions, and complete message history. The
+inference provider tokenizes this context, computes attention over
+all tokens, and generates a response. The response is appended to
+the message history, and the cycle repeats.
+
+The critical property: \emph{context is reassembled from scratch on
+every API call.} There is no persistent state at the inference layer
+between calls. The entire conversation---including tool definitions
+that haven't changed and results that will never be referenced
+again---is sent, tokenized, and attended to on every turn.
+
+\subsection{Context Windows as Physical Memory}
+
+The analogy between context windows and physical memory is structural,
+not merely metaphorical (Table~\ref{tab:vm-analogy}).
+
+\begin{table}[ht]
+\centering
+\caption{Virtual memory analogy for context window management.}
+\label{tab:vm-analogy}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{OS Concept} & \textbf{Context Window Equivalent} \\
+\midrule
+Physical memory & Context window (200K tokens) \\
+Virtual memory & Persistent state (disk, databases) \\
+Page table & Retrieval handles (UUIDs, anchors) \\
+Page fault & Model re-requests evicted content \\
+MMU & Proxy layer between client and API \\
+Working set & Currently relevant context subset \\
+Demand paging & Load tool definitions on first use \\
+Thrashing & Evict/fault cycle exceeding useful work \\
+Pinning & Fault history prevents re-eviction \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Early computer systems managed limited physical memory through
+manual overlays: programmers explicitly swapped code segments in and
+out of a fixed address space. The transition to virtual
+memory---Atlas~\citep{kilburn1962one}, Multics, then
+Unix---automated this management through hardware page tables,
+demand paging, and working-set-based eviction
+policies~\citep{denning1968working,denning1970virtual}.
+
+Context windows are in the overlay era. Applications manually
+manage what fits, with no system-level support for eviction,
+demand loading, or working set estimation.
+
+\subsection{The Memory Hierarchy}
+\label{sec:hierarchy}
+
+The field's response to context pressure is to increase context
+window size---from 4K to 32K to 128K to 1M tokens and beyond. This
+is the equivalent of building machines with more physical RAM
+instead of inventing virtual memory. It works but does not scale:
+attention cost is quadratic in context length, and the $O(n^2)$ cost
+explosion in long sessions means that even million-token windows
+fill and degrade~\citep{zeyliger2026quadratic}.
+
+The alternative is architectural: a managed hierarchy of levels,
+each larger, slower, and cheaper than the one above it, connected by
+eviction policies and fault mechanisms (Table~\ref{tab:hierarchy}).
+
+\begin{table}[ht]
+\centering
+\caption{Memory hierarchy for LLM systems.}
+\label{tab:hierarchy}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Level} & \textbf{Contents} & \textbf{Eviction} & \textbf{Fault} \\
+\midrule
+L1 & Generation window & --- & --- \\
+L2 & Working set (pinned) & Pressure-based & Re-read \\
+L3 & Session history & Age-based & Summary expansion \\
+L4 & Cross-session memory & LRU / relevance & Retrieval query \\
+Storage & Full corpus & None & Search + ingest \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{L1} is the active generation window---the tokens the model
+attends to on the current API call. Small, fast, expensive per
+token. This is what everyone calls ``the context window.''
+
+\textbf{L2} is the working set: content the model is actively using
+but that need not occupy L1 on every turn. Managed by fault-driven
+pinning (Section~\ref{sec:pinning}). A page evicted from L1 that is
+immediately re-requested is promoted to L2 and kept resident until
+context pressure forces demotion.
+
+\textbf{L3} is session history: earlier conversation turns,
+completed tool interactions, superseded plans. Compressed with
+declared losses into structured summaries. Faultable by expanding
+the summary back to original content from the client's backing
+store.
+
+\textbf{L4} is cross-session persistent memory: authored
+compressions (tensors), activity records, semantic indices. Survives
+session death. Retrieved by graph traversal or similarity search.
+
+\textbf{Storage} is the full corpus: every conversation transcript,
+every tool output, every document. Archived, indexed, never resident
+unless demanded.
+
+Content migrates between levels based on access patterns. The hot
+path stays in L1. Working-set content is demand-paged between L1 and
+L2. Cold history compresses into L3. Cross-session knowledge
+persists in L4. The context limit does not disappear---it becomes
+the L1~cache size. The total addressable memory is unbounded. System
+performance is determined by hit rates at each level, not by L1
+capacity alone.
+
+This paper implements and evaluates L1~management (eviction and
+garbage collection) and L2~management (fault-driven pinning).
+L3~(rolling conversation compaction) is implemented via cooperative
+cleanup tags (Section~\ref{sec:l3}) but not yet evaluated at scale.
+We describe the interface to L4~(persistent memory stores).
+
+\subsection{Related Work}
+\label{sec:related}
+
+\paragraph{Context compression.}
+LLMLingua~\citep{jiang2024longllmlingua} and related approaches compress
+prompts by removing tokens predicted to be low-information. These
+are lossy, model-dependent operations applied to content. Our
+interventions are structural: we remove entire categories of waste
+(unused tool schemas, duplicate content, dead results) without lossy
+compression of the remaining content.
+
+\paragraph{Agent context pruning.}
+SWE-Pruner~\citep{wang2026swepruner} trains a 0.6B-parameter neural
+skimmer for task-aware context pruning in SWE-bench agents, achieving
+23--54\% token reduction. \citet{lindenbauer2025complexity} show that
+simple observation masking halves agent cost while matching
+LLM-summarization solve rates. ACON~\citep{kang2025acon} provides a
+unified framework for history and observation compression, reducing
+peak usage by 26--54\%.
+
+These approaches frame the problem as prompt optimization or
+compression. The key difference: they optimize for benchmark scores
+on fixed task distributions. We measure production waste profiles
+and implement eviction policies with an empirically measured fault rate. Their
+framing is ``make the prompt smaller.'' Ours is ``manage the working
+set.'' Working-set management composes with other interventions and
+provides measurable fault rates.
+
+\paragraph{Quadratic cost analyses.}
+Recent work has quantified the $O(n^2)$ cost explosion in long
+agentic sessions where cache reads dominate~\citep{zeyliger2026quadratic}.
+Each API call reprocesses the full context; as sessions grow, the
+cumulative cost grows quadratically with session length. Our
+amplification factor measurement (Section~\ref{sec:amplification})
+confirms this at production scale and our interventions directly
+address it.
+
+\paragraph{Prompt caching.}
+Anthropic and OpenAI offer prompt caching that avoids recomputation
+of static prefixes. In our corpus, 93.5\% of input tokens are cache
+reads---caching is working. But cached tokens still occupy the
+context window and require attention computation for every output
+token generated. Caching reduces the input processing cost; it does
+not reduce the attention cost or the memory pressure.
+
+\paragraph{Context engineering.}
+The emerging discipline of context
+engineering~\citep{deepset2025context,willison2025context,mei2025survey}
+recognizes that managing what enters context is as important as the
+model itself. \citet{mei2025survey} survey the field comprehensively,
+covering retrieval, processing, and management. Anthropic's own
+engineering team describes practical
+patterns~\citep{rajasekaran2025context}. Our work provides a specific
+mechanism (proxy-layer interposition with eviction policies) and the
+empirical production data that the field currently lacks.
+
+\paragraph{Prompt-level memory management.}
+MemGPT~\citep{packer2023memgpt} pioneered the OS virtual memory
+analogy: a FIFO message queue with recursive summarization at
+capacity, plus archival/recall databases accessible via tool calls.
+The model can save information but cannot explicitly release it;
+eviction is capacity-triggered (flush at 100\%), not cost-driven.
+Contextual Memory Virtualisation~\citep{cmv2026} models session
+history as a DAG with structurally lossless trimming that strips
+mechanical bloat (raw tool outputs, base64, metadata) while
+preserving conversational content verbatim---achieving up to 86\%
+reduction for tool-heavy sessions. Focus~\citep{verma2026focus}
+gives the agent autonomy over compression: the LLM consolidates
+learnings into a persistent knowledge block and prunes raw history,
+inspired by slime mold exploration. SideQuest~\citep{sidequest2026}
+teaches the model to evict stale tool outputs from the KV cache via
+a fine-tuned parallel reasoning thread, achieving 56--65\% peak
+memory reduction---but eviction is irreversible and requires
+inference engine modifications.
+
+These systems address the architectural problem (MemGPT's VM
+analogy), the structural problem (CMV's lossless trimming), the
+autonomy problem (Focus's model-directed compression), or the
+inference problem (SideQuest's KV cache eviction). None derives an
+economic model where prompt-token retention cost scales quadratically
+while fault cost scales linearly. None provides cooperative
+recall/release primitives informed by that cost model. None reports
+empirical fault rates on production sessions.
+
+\paragraph{Positioning.}
+Prior work addresses either the cost problem (quadratic analyses) or
+the content problem (compression, pruning, RAG) but not the
+structural problem: context windows are unmanaged physical memory.
+Our contribution is the systems abstraction---working set, eviction
+policy, fault rate, amplification factor---and the empirical evidence
+that it works on production data.
+
+% ====================================================================
