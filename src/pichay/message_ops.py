@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 
 PICHAY_STATUS_MARKER = "[pichay-system-status]"
 
+# Tensors older than this (in minutes) with zero faults are dropped from the
+# manifest. They remain in storage and are still recallable by handle.
+MANIFEST_PRUNE_MINUTES = 5
+
 
 def _escape_xml_attr(s: str) -> str:
     """Escape a string for use in an XML attribute value."""
@@ -335,6 +339,7 @@ def inject_system_status(body: dict, ts: dict, cap: int,
         tensor_lines = []
         released_handles = getattr(page_store, "_released_handles", set())
         released_count = 0
+        pruned_count = 0
         for handle, entry in page_store._tensor_index.items():
             # Skip released entries — model already said it's done with them
             is_released = (
@@ -349,13 +354,17 @@ def inject_system_status(body: dict, ts: dict, cap: int,
                 1 for f in page_store.faults
                 if f.original_eviction.tool_use_id == entry.tool_use_id
             )
+            # Drop stale tensors from manifest (not from storage)
+            if age_min > MANIFEST_PRUNE_MINUTES and fault_count == 0:
+                pruned_count += 1
+                continue
             tensor_lines.append(
                 f'    <tensor handle="{handle}" tool="{entry.tool_name}" '
                 f'size="{entry.original_size}" age_minutes="{age_min:.0f}" '
                 f'faults="{fault_count}" '
                 f'label="{_escape_xml_attr(_label_for_entry(entry))}"/>'
             )
-        if tensor_lines:
+        if tensor_lines or pruned_count > 0:
             manifest_parts = ["\n<yuyay-manifest>\n"]
             # Feedback: what happened last turn (closed-loop)
             if last_cleanup_stats:
@@ -363,14 +372,20 @@ def inject_system_status(body: dict, ts: dict, cap: int,
                     f"  <last-turn-ops>{_escape_xml_attr(last_cleanup_stats)}"
                     f"</last-turn-ops>\n"
                 )
-            manifest_parts.append(
-                f"  <holdings count=\"{len(tensor_lines)}\" "
-                f"eviction_bytes=\"{page_store.eviction_bytes_saved}\" "
-                f"gc_bytes=\"{page_store.gc_bytes_saved}\">\n"
-                + "\n".join(tensor_lines[:15])  # cap at 15 to avoid bloat
-                + "\n  </holdings>\n"
-                "</yuyay-manifest>"
-            )
+            if pruned_count > 0:
+                manifest_parts.append(
+                    f'  <pruned count="{pruned_count}" '
+                    f'reason="age&gt;{MANIFEST_PRUNE_MINUTES}m,faults=0"/>\n'
+                )
+            if tensor_lines:
+                manifest_parts.append(
+                    f"  <holdings count=\"{len(tensor_lines)}\" "
+                    f"eviction_bytes=\"{page_store.eviction_bytes_saved}\" "
+                    f"gc_bytes=\"{page_store.gc_bytes_saved}\">\n"
+                    + "\n".join(tensor_lines[:15])  # cap at 15 to avoid bloat
+                    + "\n  </holdings>\n"
+                )
+            manifest_parts.append("</yuyay-manifest>")
             anchor_parts.append("".join(manifest_parts))
 
     if pressure in ("moderate", "high") and block_store is not None:
