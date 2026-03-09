@@ -87,6 +87,66 @@ def _duplication_score(req: CanonicalRequest) -> float:
     return max(0.0, float(len(texts) - unique) / float(len(texts)))
 
 
+def _add_cache_control(msg: dict) -> None:
+    """Add cache_control marker to the last content block of a message."""
+    content = msg.get("content")
+    if isinstance(content, str):
+        msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content:
+        last = content[-1]
+        if isinstance(last, dict):
+            last["cache_control"] = {"type": "ephemeral"}
+
+
+def _place_cache_controls(payload: dict) -> None:
+    """Place up to 4 cache_control markers in the outbound payload.
+
+    Mutates payload in place (the ephemeral copy — never the physical store).
+    Markers are placed at:
+      1. System prompt (always stable)
+      2. 25% through messages
+      3. 75% through messages
+      4. Second-to-last message (previous assistant response)
+    """
+    # 1. System prompt
+    system = payload.get("system")
+    if system is not None:
+        if isinstance(system, str):
+            payload["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        elif isinstance(system, list) and system:
+            last = system[-1]
+            if isinstance(last, dict):
+                last["cache_control"] = {"type": "ephemeral"}
+
+    messages = payload.get("messages", [])
+    n = len(messages)
+    if n < 2:
+        return
+
+    placed_indices: set[int] = set()
+
+    def _try_place(idx: int) -> None:
+        """Place cache_control at messages[idx] if valid (not last, not tool role)."""
+        if idx < 0 or idx >= n - 1:
+            return
+        if idx in placed_indices:
+            return
+        msg = messages[idx]
+        if msg.get("role") == "tool":
+            return
+        _add_cache_control(msg)
+        placed_indices.add(idx)
+
+    # 2. 25% of the way through
+    _try_place(n // 4)
+
+    # 3. 75% of the way through
+    _try_place(3 * n // 4)
+
+    # 4. Second-to-last message
+    _try_place(n - 2)
+
+
 def _copy_headers(headers: httpx.Headers) -> dict[str, str]:
     dropped = {
         "content-length",
@@ -652,6 +712,9 @@ def create_app(
 
         # 4. Build ephemeral outbound view — never mutate the physical store
         payload["messages"] = copy.deepcopy(ms.messages)
+
+        # Place cache_control markers at optimal positions
+        _place_cache_controls(payload)
 
         # System status: static system prompt + dynamic anchor
         inject_system_status(
