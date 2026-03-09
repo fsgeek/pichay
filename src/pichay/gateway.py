@@ -49,6 +49,7 @@ from pichay.message_ops import (
     PICHAY_STATUS_MARKER,
 )
 from pichay.pager import PageStore, compact_messages
+from pichay.message_store import MessageStore
 from pichay.providers import adapters
 from pichay.telemetry import Telemetry
 
@@ -399,6 +400,7 @@ class Session:
             )
         else:
             self.block_store = BlockStore()
+        self.message_store = MessageStore(sid, self.page_store)
         self.last_cleanup_stats: str | None = None
 
     def track_usage(self, usage: dict) -> None:
@@ -561,27 +563,36 @@ def create_app(
         ts = session.token_state
         request_time = datetime.now(timezone.utc)
 
-        messages = payload.get("messages", [])
+        incoming_messages = payload.get("messages", [])
         ps = session.page_store
+        ms = session.message_store
 
-        # 1. Compact old tool results → populates PageStore with entries
-        compact_stats = compact_messages(
-            messages,
+        # 1. Ingest into MessageStore (asserts append-only, compacts)
+        ingest = ms.ingest(
+            incoming_messages,
             age_threshold=4,
-            min_size=min_evict_size,
-            page_store=ps,
+            min_evict_size=min_evict_size,
         )
-        if compact_stats.evicted_count > 0:
+        if ingest.new_count > 0 or ingest.compacted_count > 0:
+            parts = []
+            if ingest.new_count:
+                parts.append(f"+{ingest.new_count} msgs")
+            if ingest.compacted_count:
+                parts.append(f"{ingest.compacted_count} evicted")
+            if ingest.bytes_saved:
+                parts.append(f"{ingest.bytes_saved:,} bytes saved")
+            if ingest.mutations_detected:
+                parts.append(f"{ingest.mutations_detected} MUTATIONS")
+            if ingest.deletions_detected:
+                parts.append(f"{ingest.deletions_detected} DELETIONS")
             print(
-                f"  {_DIM}[{session.id}] compacted: "
-                f"{compact_stats.evicted_count} evicted, "
-                f"{compact_stats.bytes_before - compact_stats.bytes_after:,} bytes saved{_RESET}",
+                f"  {_DIM}[{session.id}] ingest: {', '.join(parts)}{_RESET}",
                 file=sys.stderr,
             )
 
-        # 2. Process model releases (PageStore now populated, handles resolve)
+        # 2. Process model releases on OUR messages
         cleanup_stats = process_cleanup_tags(
-            messages, session.block_store, ps,
+            ms.messages, session.block_store, ps,
         )
         session.last_cleanup_stats = cleanup_stats
         if cleanup_stats:
@@ -590,8 +601,8 @@ def create_app(
                 file=sys.stderr,
             )
 
-        # 3. Detect page faults (re-reads of evicted content)
-        faults = ps.detect_faults(messages)
+        # 3. Detect page faults
+        faults = ps.detect_faults(ms.messages)
         if faults:
             for fault in faults:
                 ago = time.monotonic() - fault.original_eviction.evicted_at
@@ -600,6 +611,9 @@ def create_app(
                     f"{fault.tool_name} (evicted {ago:.0f}s ago){_RESET}",
                     file=sys.stderr,
                 )
+
+        # 4. Replace payload messages with our compacted version
+        payload["messages"] = ms.messages
 
         # System status: static system prompt + dynamic anchor
         inject_system_status(
@@ -610,7 +624,7 @@ def create_app(
         )
 
         # Block labeling (with injection-safe validation)
-        session.block_store.label_messages(messages, ts["turn"])
+        session.block_store.label_messages(ms.messages, ts["turn"])
 
         return payload
 
