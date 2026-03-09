@@ -388,6 +388,53 @@ class PageStore:
             ),
         }
 
+    # ── Checkpoint / Restore ─────────────────────────────────
+
+    def checkpoint(self) -> dict:
+        """Persist release and pin state across gateway restarts.
+
+        Does NOT persist original_content (too large). Tensor recall
+        after restart returns the summary stub — degraded but functional.
+        """
+        # Persist tensor index metadata (without original_content)
+        tensor_meta = {}
+        for handle, entry in self._tensor_index.items():
+            tensor_meta[handle] = {
+                "tool_name": entry.tool_name,
+                "tool_use_id": entry.tool_use_id,
+                "tool_input": entry.tool_input,
+                "original_size": entry.original_size,
+                "summary_size": len(entry.summary) if entry.summary else 0,
+                "turn_index": entry.turn_index,
+            }
+        return {
+            "released_handles": sorted(self._released_handles),
+            "released": sorted(self._released),
+            "pinned": dict(self._pinned),
+            "tensor_meta": tensor_meta,
+            "stats": {
+                "unique_evictions": self.unique_evictions,
+                "gc_count": self.gc_count,
+                "eviction_bytes_saved": self.eviction_bytes_saved,
+                "gc_bytes_saved": self.gc_bytes_saved,
+                "release_count": self.release_count,
+                "pin_count": self.pin_count,
+            },
+        }
+
+    def restore(self, data: dict) -> None:
+        """Restore release and pin state from checkpoint."""
+        self._released_handles = set(data.get("released_handles", []))
+        self._released = set(data.get("released", []))
+        self._pinned = data.get("pinned", {})
+        stats = data.get("stats", {})
+        self.unique_evictions = stats.get("unique_evictions", 0)
+        self.gc_count = stats.get("gc_count", 0)
+        self.eviction_bytes_saved = stats.get("eviction_bytes_saved", 0)
+        self.gc_bytes_saved = stats.get("gc_bytes_saved", 0)
+        self.release_count = stats.get("release_count", 0)
+        self.pin_count = stats.get("pin_count", 0)
+
 
 def _count_by(items: list, key_fn) -> dict[str, int]:
     counts: dict[str, int] = {}

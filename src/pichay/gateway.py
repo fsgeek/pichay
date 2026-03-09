@@ -392,6 +392,24 @@ class Session:
             log_path=log_dir / f"pages_{sid}.jsonl",
         )
         self._block_checkpoint = log_dir / f"blocks_{sid}.json"
+        self._page_checkpoint = log_dir / f"pages_{sid}_checkpoint.json"
+        if self._page_checkpoint.is_file():
+            import json as _json
+            try:
+                with open(self._page_checkpoint) as f:
+                    data = _json.load(f)
+                self.page_store.restore(data)
+                print(
+                    f"  {_DIM}[{sid}] restored page_store: "
+                    f"{len(self.page_store._released_handles)} released handles, "
+                    f"{len(self.page_store._pinned)} pinned{_RESET}",
+                    file=sys.stderr,
+                )
+            except (json.JSONDecodeError, ValueError, KeyError) as exc:
+                print(
+                    f"  {_YELLOW}[{sid}] corrupt page checkpoint, ignoring: {exc}{_RESET}",
+                    file=sys.stderr,
+                )
         if self._block_checkpoint.is_file():
             self.block_store = BlockStore.from_checkpoint(self._block_checkpoint)
             print(
@@ -539,6 +557,32 @@ def create_app(
             "sessions": telemetry.session_summary(),
         }
 
+    import re as _re
+    _STATUS_PATTERN = _re.compile(
+        r'\[pichay-live-status\].*?(?=\n\n|\n[^\s]|\Z)',
+        _re.DOTALL,
+    )
+
+    def _strip_stale_status(messages: list[dict]) -> None:
+        """Remove pichay-live-status blocks from all but the last user message."""
+        last_user_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+        for i, msg in enumerate(messages):
+            if msg.get("role") != "user" or i == last_user_idx:
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and "[pichay-live-status]" in content:
+                msg["content"] = _STATUS_PATTERN.sub("", content).strip()
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if "[pichay-live-status]" in text:
+                            block["text"] = _STATUS_PATTERN.sub("", text).strip()
+
     @app.get("/api/events")
     def api_events(window: str | None = None) -> dict[str, Any]:
         window_seconds = None
@@ -618,6 +662,9 @@ def create_app(
         # 4. Replace payload messages with our compacted version
         payload["messages"] = ms.messages
 
+        # 5. Strip stale pichay-live-status from all but last user message
+        _strip_stale_status(payload["messages"])
+
         # System status: static system prompt + dynamic anchor
         inject_system_status(
             payload, ts, token_cap, request_time,
@@ -628,6 +675,11 @@ def create_app(
 
         # Block labeling (with injection-safe validation)
         session.block_store.label_messages(ms.messages, ts["turn"])
+
+        # Checkpoint page_store (releases, pins survive restart)
+        import json as _json
+        with open(session._page_checkpoint, "w") as f:
+            _json.dump(session.page_store.checkpoint(), f)
 
         return payload
 
@@ -911,6 +963,33 @@ def create_app(
             "chat_completions",
             _payload_with_headers(request, payload),
             query_string=request.url.query,
+        )
+
+    # ── Catch-all proxy for unhandled /v1/ routes ──────────────────
+    # Claude Code may hit /v1/models or other endpoints for validation.
+    # Forward anything we don't explicitly handle to the real API.
+    @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def proxy_passthrough(request: Request, path: str):
+        import httpx
+        api_key = request.headers.get("x-api-key", "")
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": request.headers.get("anthropic-version", "2023-06-01"),
+            "content-type": request.headers.get("content-type", "application/json"),
+        }
+        url = f"https://api.anthropic.com/v1/{path}"
+        if request.url.query:
+            url += f"?{request.url.query}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            if request.method == "GET":
+                resp = await client.get(url, headers=headers)
+            else:
+                body = await request.body()
+                resp = await client.request(request.method, url, headers=headers, content=body)
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
         )
 
     return app

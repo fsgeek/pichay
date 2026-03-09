@@ -362,7 +362,8 @@ def inject_system_status(body: dict, ts: dict, cap: int,
         anchor_parts.append(
             "\nCooperative memory: include <memory_cleanup> tags to manage. "
             "Ops: drop: block:XXXX, summarize: block:XXXX \"text\", "
-            "anchor: block:XXXX, release: path1,path2"
+            "anchor: block:XXXX, release: path1,path2, "
+            "collapse: turns N-M \"summary\""
         )
 
         if pressure == "high" and page_store is not None and page_store._tensor_index:
