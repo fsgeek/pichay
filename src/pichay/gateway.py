@@ -98,16 +98,38 @@ def _add_cache_control(msg: dict) -> None:
             last["cache_control"] = {"type": "ephemeral"}
 
 
+def _strip_all_cache_controls(payload: dict) -> None:
+    """Remove all existing cache_control markers from system and messages.
+
+    Must run before _place_cache_controls to prevent exceeding the 4-block
+    API limit. Claude Code places its own markers on the system prompt;
+    without stripping first we can end up with 5+.
+    """
+    system = payload.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                block.pop("cache_control", None)
+    for msg in payload.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+
 def _place_cache_controls(payload: dict) -> None:
     """Place up to 4 cache_control markers in the outbound payload.
 
     Mutates payload in place (the ephemeral copy — never the physical store).
-    Markers are placed at:
+    Strips all existing markers first, then places fresh ones at:
       1. System prompt (always stable)
       2. 25% through messages
       3. 75% through messages
       4. Second-to-last message (previous assistant response)
     """
+    _strip_all_cache_controls(payload)
+
     # 1. System prompt
     system = payload.get("system")
     if system is not None:
