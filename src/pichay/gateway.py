@@ -18,6 +18,7 @@ The gateway intercepts, transforms, and forwards API requests. Features:
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 from contextlib import asynccontextmanager
 import json
@@ -563,32 +564,6 @@ def create_app(
             "sessions": telemetry.session_summary(),
         }
 
-    import re as _re
-    _STATUS_PATTERN = _re.compile(
-        r'\[pichay-live-status\].*?(?=\n\n|\n[^\s]|\Z)',
-        _re.DOTALL,
-    )
-
-    def _strip_stale_status(messages: list[dict]) -> None:
-        """Remove pichay-live-status blocks from all but the last user message."""
-        last_user_idx = -1
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                last_user_idx = i
-                break
-        for i, msg in enumerate(messages):
-            if msg.get("role") != "user" or i == last_user_idx:
-                continue
-            content = msg.get("content")
-            if isinstance(content, str) and "[pichay-live-status]" in content:
-                msg["content"] = _STATUS_PATTERN.sub("", content).strip()
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        if "[pichay-live-status]" in text:
-                            block["text"] = _STATUS_PATTERN.sub("", text).strip()
-
     @app.get("/api/events")
     def api_events(window: str | None = None) -> dict[str, Any]:
         window_seconds = None
@@ -675,11 +650,8 @@ def create_app(
                     file=sys.stderr,
                 )
 
-        # 4. Replace payload messages with our compacted version
-        payload["messages"] = ms.messages
-
-        # 5. Strip stale pichay-live-status from all but last user message
-        _strip_stale_status(payload["messages"])
+        # 4. Build ephemeral outbound view — never mutate the physical store
+        payload["messages"] = copy.deepcopy(ms.messages)
 
         # System status: static system prompt + dynamic anchor
         inject_system_status(
@@ -892,6 +864,7 @@ def create_app(
                         streaming=True,
                         duplication_score=duplication_score,
                         usage=usage,
+                        messages_full=payload.get("messages", []),
                     )
             return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -947,6 +920,7 @@ def create_app(
             streaming=False,
             duplication_score=duplication_score,
             usage=usage,
+            messages_full=payload.get("messages", []),
         )
         return Response(content=resp.content, status_code=resp.status_code, headers=_copy_headers(resp.headers))
 
