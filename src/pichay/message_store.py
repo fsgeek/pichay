@@ -18,6 +18,8 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+from datetime import datetime, timezone
 
 from pichay.pager import PageStore, compact_messages
 
@@ -78,9 +80,11 @@ class IngestResult:
 class MessageStore:
     """Pichay's compacted conversation history for a session."""
 
-    def __init__(self, session_id: str, page_store: PageStore):
+    def __init__(self, session_id: str, page_store: PageStore,
+                 log_path: Path | None = None):
         self.session_id = session_id
         self.page_store = page_store
+        self.log_path = log_path
         # Our compacted message list — this is what goes to the API
         self._messages: list[dict] = []
         # Fingerprints of known messages for append-only assertion
@@ -89,6 +93,32 @@ class MessageStore:
         self.total_ingested: int = 0
         self.total_mutations: int = 0
         self.total_deletions: int = 0
+        self._turn: int = 0
+
+    def _log_violation(self, kind: str, index: int, msg: dict | None,
+                       expected_fp: str, actual_fp: str) -> None:
+        """Log append-only violations to file for later analysis."""
+        if self.log_path is None:
+            return
+        record = {
+            "type": "append_only_violation",
+            "kind": kind,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+            "turn": self._turn,
+            "message_index": index,
+            "expected_fingerprint": expected_fp,
+            "actual_fingerprint": actual_fp,
+        }
+        if msg is not None:
+            record["role"] = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                record["content_preview"] = json.dumps(content, default=str)[:500]
+            else:
+                record["content_preview"] = str(content)[:500]
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
 
     @property
     def messages(self) -> list[dict]:
@@ -112,6 +142,7 @@ class MessageStore:
 
         Returns IngestResult with stats about what happened.
         """
+        self._turn += 1
         result = IngestResult()
         known_count = len(self._fingerprints)
 
@@ -123,6 +154,10 @@ class MessageStore:
             if fp != self._fingerprints[i]:
                 result.mutations_detected += 1
                 self.total_mutations += 1
+                self._log_violation(
+                    "mutation", i, incoming[i],
+                    self._fingerprints[i], fp,
+                )
                 print(
                     f"  {_YELLOW}[{self.session_id}] APPEND-ONLY VIOLATION at index {i}: "
                     f"expected {self._fingerprints[i][:32]}, "
@@ -138,6 +173,10 @@ class MessageStore:
             deleted = known_count - len(incoming)
             result.deletions_detected = deleted
             self.total_deletions += deleted
+            self._log_violation(
+                "deletion", known_count, None,
+                f"expected_{known_count}", f"got_{len(incoming)}",
+            )
             print(
                 f"  {_RED}[{self.session_id}] DELETION DETECTED: "
                 f"expected {known_count} messages, got {len(incoming)} "

@@ -400,7 +400,10 @@ class Session:
             )
         else:
             self.block_store = BlockStore()
-        self.message_store = MessageStore(sid, self.page_store)
+        self.message_store = MessageStore(
+            sid, self.page_store,
+            log_path=log_dir / f"violations_{sid}.jsonl" if log_dir else None,
+        )
         self.last_cleanup_stats: str | None = None
 
     def track_usage(self, usage: dict) -> None:
