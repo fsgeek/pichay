@@ -215,10 +215,10 @@ def test_telemetry_invariant_contract_direct(tmp_path: Path):
         duplication_score=0.0,
     )
     events = t.recent_events()
-    inv = [e for e in events if e.get("type") == "invariant_violation"]
+    inv = [e for e in events if e.get("type") == "anomaly"]
     assert inv
     e = inv[-1]
-    assert e["kind"] == "outgoing_larger_than_incoming"
+    assert e["kind"] == "outgoing_growth_suspicious"
     assert e["incoming_bytes"] == 10
     assert e["outgoing_bytes"] == 20
 

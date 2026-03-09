@@ -35,9 +35,9 @@ POLICY_CONFLICTS = Counter(
     ["winner_stage", "loser_stage"],
 )
 
-INVARIANTS = Counter(
-    "pichay_invariant_violations_total",
-    "Invariant violations",
+ANOMALIES = Counter(
+    "pichay_anomalies_total",
+    "Data anomalies detected",
     ["kind"],
 )
 
@@ -121,8 +121,8 @@ class Telemetry:
                 winner_stage=fields.get("winner_stage", "unknown"),
                 loser_stage=fields.get("loser_stage", "unknown"),
             ).inc()
-        if event_type == "invariant_violation":
-            INVARIANTS.labels(kind=fields.get("kind", "unknown")).inc()
+        if event_type == "anomaly":
+            ANOMALIES.labels(kind=fields.get("kind", "unknown")).inc()
 
     def record_request(
         self,
@@ -184,16 +184,23 @@ class Telemetry:
             cache_read_pct=round(cache_read_pct, 1),
         )
 
-        if outgoing_bytes > incoming_bytes:
-            self.emit(
-                "invariant_violation",
-                kind="outgoing_larger_than_incoming",
-                request_id=request_id,
-                session_id=session_id,
-                provider=provider,
-                incoming_bytes=incoming_bytes,
-                outgoing_bytes=outgoing_bytes,
-            )
+        # Small increases are expected — Pichay injects tensor handles,
+        # yuyay manifests, system reminders. Only flag when growth exceeds
+        # 5% of incoming (suggesting duplicated message blocks, not injection).
+        if incoming_bytes > 0 and outgoing_bytes > incoming_bytes:
+            growth_pct = (outgoing_bytes - incoming_bytes) / incoming_bytes
+            if growth_pct > 0.05:
+                self.emit(
+                    "anomaly",
+                    kind="outgoing_growth_suspicious",
+                    request_id=request_id,
+                    session_id=session_id,
+                    provider=provider,
+                    incoming_bytes=incoming_bytes,
+                    outgoing_bytes=outgoing_bytes,
+                    growth_pct=round(growth_pct * 100, 1),
+                    duplication_score=duplication_score,
+                )
 
         # Flag unexpected cache misses: request had enough tokens to cache
         # but got zero cache reads. Skip first request per session (cold start).

@@ -64,7 +64,7 @@ def _events(app):
     return app.state.telemetry.recent_events()
 
 
-def test_malformed_stream_chunk_emits_invariant_violation(tmp_path: Path):
+def test_malformed_stream_chunk_emits_anomaly(tmp_path: Path):
     app = create_app(
         log_dir=tmp_path,
         anthropic_upstream="http://anthropic.test",
@@ -91,7 +91,7 @@ def test_malformed_stream_chunk_emits_invariant_violation(tmp_path: Path):
     assert b"{not-json}" in body
 
     events = _events(app)
-    assert any(e.get("type") == "invariant_violation" and e.get("kind") == "malformed_stream_chunk" for e in events)
+    assert any(e.get("type") == "anomaly" and e.get("kind") == "malformed_stream_chunk" for e in events)
     assert any(e.get("type") == "request_metrics" for e in events)
 
 
@@ -352,10 +352,10 @@ def test_events_api_with_valid_window(tmp_path: Path):
     assert len(resp.json()["events"]) >= 1
 
 
-# ── Observability: telemetry emits outgoing>incoming invariant ─────
+# ── Observability: telemetry emits outgoing>incoming anomaly ─────
 
 
-def test_telemetry_emits_outgoing_larger_invariant(tmp_path: Path):
+def test_telemetry_emits_outgoing_larger_anomaly(tmp_path: Path):
     t = Telemetry(log_path=tmp_path / "test.jsonl", hydration_window_seconds=3600)
     t.record_request(
         request_id="r1", session_id="s1", provider="anthropic",
@@ -363,8 +363,8 @@ def test_telemetry_emits_outgoing_larger_invariant(tmp_path: Path):
         latency_ms=10.0, streaming=False, duplication_score=0.0,
     )
     events = t.recent_events()
-    violations = [e for e in events if e.get("type") == "invariant_violation"
-                  and e.get("kind") == "outgoing_larger_than_incoming"]
+    violations = [e for e in events if e.get("type") == "anomaly"
+                  and e.get("kind") == "outgoing_growth_suspicious"]
     assert violations
     assert violations[0]["incoming_bytes"] == 100
     assert violations[0]["outgoing_bytes"] == 200

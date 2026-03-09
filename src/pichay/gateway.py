@@ -48,7 +48,7 @@ from pichay.message_ops import (
     process_cleanup_tags,
     PICHAY_STATUS_MARKER,
 )
-from pichay.pager import PageStore
+from pichay.pager import PageStore, compact_messages
 from pichay.providers import adapters
 from pichay.telemetry import Telemetry
 
@@ -121,7 +121,7 @@ def _inspect_sse_chunk(
             text = raw_event.decode("utf-8")
         except UnicodeDecodeError as e:
             emit_event(
-                "invariant_violation",
+                "anomaly",
                 kind="malformed_stream_chunk",
                 request_id=request_id,
                 session_id=session_id,
@@ -152,7 +152,7 @@ def _inspect_sse_chunk(
                             usage_accumulator.update(usage)
             except json.JSONDecodeError as e:
                 emit_event(
-                    "invariant_violation",
+                    "anomaly",
                     kind="malformed_stream_chunk",
                     request_id=request_id,
                     session_id=session_id,
@@ -259,8 +259,8 @@ def _dashboard_html() -> str:
   </header>
   <main class="grid">
     <section class="panel kpi"><h2>Requests</h2><div class="v" id="kpi-req">0</div><div class="sub">total observed</div></section>
-    <section class="panel kpi"><h2>Shrink Ratio</h2><div class="v" id="kpi-shrink">1.00</div><div class="sub">avg outgoing/incoming</div></section>
-    <section class="panel kpi"><h2>Violations</h2><div class="v status-warn" id="kpi-viol">0</div><div class="sub">invariant alerts</div></section>
+    <section class="panel kpi"><h2>Fault Rate</h2><div class="v" id="kpi-fault-rate">0%</div><div class="sub">page faults / evictions</div></section>
+    <section class="panel kpi"><h2>Anomalies</h2><div class="v status-warn" id="kpi-viol">0</div><div class="sub">data anomalies</div></section>
     <section class="panel kpi"><h2>Stream Errors</h2><div class="v status-err" id="kpi-se">0</div><div class="sub">terminal stream failures</div></section>
 
     <section class="panel wide">
@@ -268,14 +268,14 @@ def _dashboard_html() -> str:
       <div class="spark" id="spark-wrap"><svg id="spark"></svg></div>
     </section>
     <section class="panel mid">
-      <h2>Health</h2>
-      <div class="sub" id="health">loading...</div>
+      <h2>Paging</h2>
+      <div class="sub" id="paging">loading...</div>
     </section>
 
     <section class="panel full">
       <h2>Session Totals</h2>
       <table>
-        <thead><tr><th>Session</th><th>Requests</th><th>Incoming Bytes</th><th>Outgoing Bytes</th></tr></thead>
+        <thead><tr><th>Session</th><th>Requests</th><th>Tokens</th><th>Evictions</th><th>Faults</th><th>Fault Rate</th><th>GC</th><th>Incoming</th><th>Outgoing</th></tr></thead>
         <tbody id="sessions"></tbody>
       </table>
     </section>
@@ -317,29 +317,46 @@ def _dashboard_html() -> str:
 
       document.getElementById('meta').textContent =
         `process ${health.process_session_id} • providers: ${health.providers.join(', ')}`;
-      document.getElementById('health').textContent =
-        `${health.status} | log ${health.log_path}`;
+
+      // Aggregate paging stats from /health per-session data
+      const hs = health.sessions || {};
+      let totalEvictions = 0, totalFaults = 0, totalGC = 0;
+      for (const s of Object.values(hs)) {
+        totalEvictions += s.evictions || 0;
+        totalFaults += s.faults || 0;
+        totalGC += s.gc || 0;
+      }
+      const faultRate = totalEvictions > 0 ? (totalFaults / totalEvictions * 100) : 0;
+
+      document.getElementById('paging').innerHTML =
+        `evictions: ${fmt(totalEvictions)} · faults: ${fmt(totalFaults)} · GC: ${fmt(totalGC)}`;
+      document.getElementById('kpi-fault-rate').textContent = toFixed(faultRate, 1) + '%';
 
       const ev = eventsResp.events || [];
       const req = ev.filter(e => e.type === 'request_metrics');
-      const viol = ev.filter(e => e.type === 'invariant_violation');
+      const viol = ev.filter(e => e.type === 'anomaly');
       const se = ev.filter(e => e.type === 'stream_error');
-      const avgShrink = req.length ? req.reduce((a, r) => a + Number(r.shrink_ratio || 1), 0) / req.length : 1.0;
 
       document.getElementById('kpi-req').textContent = fmt(req.length);
-      document.getElementById('kpi-shrink').textContent = toFixed(avgShrink, 3);
       document.getElementById('kpi-viol').textContent = fmt(viol.length);
       document.getElementById('kpi-se').textContent = fmt(se.length);
 
       renderSpark(req.slice(-80).map(r => Number(r.shrink_ratio || 1)));
 
+      // Session table: merge telemetry bytes with /health paging stats
       const tbody = document.getElementById('sessions');
       tbody.innerHTML = '';
       const entries = Object.entries(sessions.sessions || {});
       entries.sort((a,b) => (b[1].request_count||0) - (a[1].request_count||0));
       for (const [sid, s] of entries) {
+        const h = hs[sid] || {};
+        const sEvict = h.evictions || 0;
+        const sFaults = h.faults || 0;
+        const sFaultRate = sEvict > 0 ? (sFaults / sEvict * 100).toFixed(1) + '%' : '-';
+        const sGC = h.gc || 0;
+        const sTok = h.last_effective_tokens || 0;
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${sid}</td><td>${fmt(s.request_count)}</td><td>${fmt(s.incoming_bytes)}</td><td>${fmt(s.outgoing_bytes)}</td>`;
+        tr.innerHTML = `<td>${sid}</td><td>${fmt(s.request_count)}</td><td>${fmt(sTok)}</td><td>${fmt(sEvict)}</td><td>${fmt(sFaults)}</td><td>${sFaultRate}</td><td>${fmt(sGC)}</td><td>${fmt(s.incoming_bytes)}</td><td>${fmt(s.outgoing_bytes)}</td>`;
         tbody.appendChild(tr);
       }
 
@@ -382,6 +399,7 @@ class Session:
             )
         else:
             self.block_store = BlockStore()
+        self.last_cleanup_stats: str | None = None
 
     def track_usage(self, usage: dict) -> None:
         """Update token state from API response usage."""
@@ -543,14 +561,55 @@ def create_app(
         ts = session.token_state
         request_time = datetime.now(timezone.utc)
 
+        messages = payload.get("messages", [])
+        ps = session.page_store
+
+        # 1. Compact old tool results → populates PageStore with entries
+        compact_stats = compact_messages(
+            messages,
+            age_threshold=4,
+            min_size=min_evict_size,
+            page_store=ps,
+        )
+        if compact_stats.evicted_count > 0:
+            print(
+                f"  {_DIM}[{session.id}] compacted: "
+                f"{compact_stats.evicted_count} evicted, "
+                f"{compact_stats.bytes_before - compact_stats.bytes_after:,} bytes saved{_RESET}",
+                file=sys.stderr,
+            )
+
+        # 2. Process model releases (PageStore now populated, handles resolve)
+        cleanup_stats = process_cleanup_tags(
+            messages, session.block_store, ps,
+        )
+        session.last_cleanup_stats = cleanup_stats
+        if cleanup_stats:
+            print(
+                f"  {_DIM}[{session.id}] cleanup: {cleanup_stats}{_RESET}",
+                file=sys.stderr,
+            )
+
+        # 3. Detect page faults (re-reads of evicted content)
+        faults = ps.detect_faults(messages)
+        if faults:
+            for fault in faults:
+                ago = time.monotonic() - fault.original_eviction.evicted_at
+                print(
+                    f"  {_YELLOW}[{session.id}] PAGE FAULT: "
+                    f"{fault.tool_name} (evicted {ago:.0f}s ago){_RESET}",
+                    file=sys.stderr,
+                )
+
         # System status: static system prompt + dynamic anchor
         inject_system_status(
             payload, ts, token_cap, request_time,
             block_store=session.block_store,
+            page_store=ps,
+            last_cleanup_stats=session.last_cleanup_stats,
         )
 
         # Block labeling (with injection-safe validation)
-        messages = payload.get("messages", [])
         session.block_store.label_messages(messages, ts["turn"])
 
         return payload
@@ -641,23 +700,7 @@ def create_app(
         #     print(f"  {_RED}[{session.id}] {tag_error}{_RESET}", file=sys.stderr)
         #     raise HTTPException(status_code=400, detail=tag_error)
 
-        # Process cleanup tags from assistant messages (model is TCB)
-        if endpoint == "messages":
-            messages = payload.get("messages", [])
-            cleanup_stats = process_cleanup_tags(
-                messages, session.block_store, session.page_store,
-            )
-            if cleanup_stats:
-                print(
-                    f"  {_DIM}[{session.id}] cleanup: {cleanup_stats}{_RESET}",
-                    file=sys.stderr,
-                )
-                # Checkpoint block state after cleanup mutations
-                saved = session.block_store.checkpoint(session._block_checkpoint)
-                print(
-                    f"  {_DIM}[{session.id}] checkpointed {saved} blocks{_RESET}",
-                    file=sys.stderr,
-                )
+        # Cleanup now runs inside _preprocess (before manifest injection)
 
         # Pre-process: system status, block labeling
         if endpoint == "messages":

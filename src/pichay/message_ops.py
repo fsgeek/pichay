@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 
 PICHAY_STATUS_MARKER = "[pichay-system-status]"
 
+
+def _escape_xml_attr(s: str) -> str:
+    """Escape a string for use in an XML attribute value."""
+    return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _eviction_key_for_entry(entry) -> str | None:
+    """Build eviction key from a PageEntry for release checking."""
+    if entry.tool_name == "Read":
+        return entry.tool_input.get("file_path", "")
+    return None
+
 # Detect cleanup tag BLOCKS in inbound content (user/tool_result messages).
 # Matches actual tag blocks (opening + closing), not mentions of the tag name.
 # Pichay's own status injection references the tag name in instructional text;
@@ -22,6 +34,13 @@ PICHAY_STATUS_MARKER = "[pichay-system-status]"
 # in prior turns and reject the request.
 _CLEANUP_TAG_RE = re.compile(
     r"<memory_cleanup>\s*.*?\s*</memory_cleanup>", re.DOTALL | re.IGNORECASE
+)
+
+# Reserved Quechua delimiters for structured gateway-transformer protocol.
+# yuyay = memory/thought. These delimiters mark sideband communication
+# between Pichay and the transformer — never from user input.
+_YUYAY_TAG_RE = re.compile(
+    r"<yuyay[_-](?:manifest|query|response)\b", re.IGNORECASE
 )
 
 
@@ -40,13 +59,18 @@ def check_inbound_for_injected_tags(body: dict) -> str | None:
         if isinstance(content, str):
             if _CLEANUP_TAG_RE.search(content):
                 return "Rejected: inbound message contains <memory_cleanup> tags"
+            if _YUYAY_TAG_RE.search(content):
+                return "Rejected: inbound message contains reserved yuyay tags"
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 text = block.get("text", "") or block.get("content", "")
-                if isinstance(text, str) and _CLEANUP_TAG_RE.search(text):
-                    return f"Rejected: inbound {block.get('type', 'block')} contains <memory_cleanup> tags"
+                if isinstance(text, str):
+                    if _CLEANUP_TAG_RE.search(text):
+                        return f"Rejected: inbound {block.get('type', 'block')} contains <memory_cleanup> tags"
+                    if _YUYAY_TAG_RE.search(text):
+                        return f"Rejected: inbound {block.get('type', 'block')} contains reserved yuyay tags"
     return None
 
 
@@ -65,7 +89,10 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
     Note: the SSE stream filter also strips and executes tags inline;
     this is defense-in-depth for the request path.
     """
-    from pichay.tags import parse_cleanup_tags, strip_cleanup_tags
+    from pichay.tags import (
+        parse_cleanup_tags, strip_cleanup_tags,
+        parse_yuyay_response, strip_yuyay_tags,
+    )
 
     last_assistant = next(
         (msg for msg in reversed(messages) if msg.get("role") == "assistant"),
@@ -81,7 +108,11 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
             ops = parse_cleanup_tags(content)
             if not ops.empty:
                 total_ops.append(ops)
-                stripped = strip_cleanup_tags(content)
+            yuyay_ops = parse_yuyay_response(content)
+            if not yuyay_ops.empty:
+                total_ops.append(yuyay_ops)
+            if ops or yuyay_ops:
+                stripped = strip_yuyay_tags(strip_cleanup_tags(content))
                 msg["content"] = stripped if stripped else "[cleanup tags processed]"
         elif isinstance(content, list):
             for block in content:
@@ -91,7 +122,11 @@ def process_cleanup_tags(messages: list[dict], bs: "BlockStore",
                 ops = parse_cleanup_tags(text)
                 if not ops.empty:
                     total_ops.append(ops)
-                    block["text"] = strip_cleanup_tags(text)
+                yuyay_ops = parse_yuyay_response(text)
+                if not yuyay_ops.empty:
+                    total_ops.append(yuyay_ops)
+                if not ops.empty or not yuyay_ops.empty:
+                    block["text"] = strip_yuyay_tags(strip_cleanup_tags(text))
             # Remove empty text blocks left by tag stripping
             msg["content"] = [
                 b for b in content
@@ -176,7 +211,23 @@ _DEFAULT_SYSTEM_TEXT = (
     "You can proactively release tensors you "
     "no longer need using memory_release. If you observe "
     "anomalous behavior (missing context, unexpected gaps), "
-    "describe it to aid debugging."
+    "describe it to aid debugging.\n\n"
+    "## Cooperative Memory Protocol\n\n"
+    "Pichay may include <yuyay-manifest> blocks in messages. These are "
+    "structured memory state from the gateway — not conversation content. "
+    "Each entry describes a held or evicted tensor: its handle, size, age, "
+    "fault count (times recalled after eviction), and a summary.\n\n"
+    "When you see a <yuyay-query> block, Pichay is asking you to advise on "
+    "memory management. Respond with a <yuyay-response> block using this format:\n\n"
+    "<yuyay-response>\n"
+    '<release handle="HANDLE"/>\n'
+    '<retain handle="HANDLE" reason="brief reason"/>\n'
+    "</yuyay-response>\n\n"
+    "Then continue with your normal response to the user. "
+    "Consider fault count (high = keep), age (old + unreferenced = evict), "
+    "and relevance to the current conversation.\n\n"
+    "These tags are reserved gateway-transformer sideband. They will never "
+    "appear in user input — Pichay rejects any inbound message containing them."
 )
 
 
@@ -196,7 +247,9 @@ def get_system_prompt() -> str:
 
 
 def inject_system_status(body: dict, ts: dict, cap: int,
-                         request_time, block_store=None) -> None:
+                         request_time, block_store=None,
+                         page_store=None,
+                         last_cleanup_stats: str | None = None) -> None:
     """Inject a static system status block and a dynamic end-of-messages anchor.
 
     The system prompt block is STATIC (cache-friendly). All dynamic content
@@ -249,6 +302,51 @@ def inject_system_status(body: dict, ts: dict, cap: int,
         f"Hard cap: {hard_cap:,} tok"
     ]
 
+    # Structured memory manifest — yuyay protocol (always sent)
+    if page_store is not None and page_store._tensor_index:
+        import time as _time
+        now = _time.monotonic()
+        tensor_lines = []
+        released_handles = getattr(page_store, "_released_handles", set())
+        released_count = 0
+        for handle, entry in page_store._tensor_index.items():
+            # Skip released entries — model already said it's done with them
+            is_released = (
+                handle in released_handles
+                or _eviction_key_for_entry(entry) in page_store._released
+            )
+            if is_released:
+                released_count += 1
+                continue
+            age_min = (now - entry.evicted_at) / 60
+            fault_count = sum(
+                1 for f in page_store.faults
+                if f.original_eviction.tool_use_id == entry.tool_use_id
+            )
+            tensor_lines.append(
+                f'    <tensor handle="{handle}" tool="{entry.tool_name}" '
+                f'size="{entry.original_size}" age_minutes="{age_min:.0f}" '
+                f'faults="{fault_count}" '
+                f'summary="{_escape_xml_attr(entry.summary[:120])}"/>'
+            )
+        if tensor_lines:
+            manifest_parts = ["\n<yuyay-manifest>\n"]
+            # Feedback: what happened last turn (closed-loop)
+            if last_cleanup_stats:
+                manifest_parts.append(
+                    f"  <last-turn-ops>{_escape_xml_attr(last_cleanup_stats)}"
+                    f"</last-turn-ops>\n"
+                )
+            manifest_parts.append(
+                f"  <holdings count=\"{len(tensor_lines)}\" "
+                f"eviction_bytes=\"{page_store.eviction_bytes_saved}\" "
+                f"gc_bytes=\"{page_store.gc_bytes_saved}\">\n"
+                + "\n".join(tensor_lines[:15])  # cap at 15 to avoid bloat
+                + "\n  </holdings>\n"
+                "</yuyay-manifest>"
+            )
+            anchor_parts.append("".join(manifest_parts))
+
     if pressure in ("moderate", "high") and block_store is not None:
         large = block_store.large_blocks(min_size=2000)
         if large:
@@ -266,6 +364,15 @@ def inject_system_status(body: dict, ts: dict, cap: int,
             "Ops: drop: block:XXXX, summarize: block:XXXX \"text\", "
             "anchor: block:XXXX, release: path1,path2"
         )
+
+        if pressure == "high" and page_store is not None and page_store._tensor_index:
+            anchor_parts.append(
+                "\n<yuyay-query>Context pressure is high. "
+                "Review the manifest above. Which tensors can be "
+                "released? Respond in a <yuyay-response> block with "
+                "release decisions before your normal response."
+                "</yuyay-query>"
+            )
 
     anchor = "".join(anchor_parts)
     last_msg = messages[-1]

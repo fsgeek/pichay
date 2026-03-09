@@ -125,7 +125,8 @@ class PageStore:
         self.pin_count: int = 0
 
         # Model-initiated release: paths the model says it's done with
-        self._released: set[str] = set()
+        self._released: set[str] = set()          # eviction keys (file paths)
+        self._released_handles: set[str] = set()  # tensor handles (all tools)
         self.release_count: int = 0
 
         # Tensor index: tensor_handle → PageEntry (unified addressing)
@@ -202,19 +203,23 @@ class PageStore:
         Released content is eligible for immediate eviction and
         will not be pinned on re-access. Returns True if found.
         """
-        # Try tensor handle
+        # Try tensor handle — this is the primary path
         entry = self._tensor_index.get(identifier)
         if entry:
+            # Always track by handle (works for all tool types)
+            self._released_handles.add(identifier)
+            # Also track by eviction key for Read tools (fault matching)
             key = _eviction_key(entry.tool_name, entry.tool_input)
             if key:
                 self._released.add(key)
-                self._pinned.pop(key, None)  # Unpin if pinned
+                self._pinned.pop(key, None)
             self.release_count += 1
             if self.log_path is not None:
                 record = {
                     "type": "release",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "identifier": identifier,
+                    "tool": entry.tool_name,
                     "resolved_to": key or entry.tool_use_id,
                 }
                 with open(self.log_path, "a", encoding="utf-8") as f:
