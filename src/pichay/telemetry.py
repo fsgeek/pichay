@@ -152,19 +152,32 @@ class Telemetry:
         SHRINK_RATIO.labels(provider=provider).observe(shrink_ratio)
 
         # Cache analysis
+        input_tokens = 0
         cache_read = 0
         cache_create = 0
         cache_read_pct = 0.0
+        effective_tokens = 0
         if usage:
+            input_tokens = usage.get("input_tokens", 0)
             cache_read = usage.get("cache_read_input_tokens", 0)
             cache_create = usage.get("cache_creation_input_tokens", 0)
-            uncached = usage.get("input_tokens", 0)
-            effective = cache_read + cache_create + uncached
-            cache_read_pct = (cache_read / effective * 100) if effective > 0 else 0.0
+            effective_tokens = input_tokens + cache_read + cache_create
+            cache_read_pct = (cache_read / effective_tokens * 100) if effective_tokens > 0 else 0.0
             if cache_read:
                 CACHE_READ.labels(provider=provider).inc(cache_read)
             if cache_create:
                 CACHE_CREATE.labels(provider=provider).inc(cache_create)
+
+        # Token-equivalent economics for subscription-style pricing:
+        # cached read ~= 0.1x cost; miss ~= 1.0x cost.
+        # A full miss therefore carries roughly a 0.9x premium on effective tokens.
+        miss_penalty_tokens_est = 0.0
+        if effective_tokens > 0 and cache_read == 0:
+            miss_penalty_tokens_est = 0.9 * effective_tokens
+
+        # Rough local savings signal from payload shrink (bytes to tokens @ ~4 bytes/token).
+        size_saved_tokens_est = max(0.0, (incoming_bytes - outgoing_bytes) / 4.0)
+        net_token_value_est = size_saved_tokens_est - miss_penalty_tokens_est
 
         self.emit(
             "request_metrics",
@@ -179,9 +192,14 @@ class Telemetry:
             duplication_score=duplication_score,
             latency_ms=latency_ms,
             streaming=streaming,
+            input_tokens=input_tokens,
             cache_read_tokens=cache_read,
             cache_create_tokens=cache_create,
+            effective_tokens=effective_tokens,
             cache_read_pct=round(cache_read_pct, 1),
+            miss_penalty_tokens_est=round(miss_penalty_tokens_est, 1),
+            size_saved_tokens_est=round(size_saved_tokens_est, 1),
+            net_token_value_est=round(net_token_value_est, 1),
         )
 
         # Small increases are expected — Pichay injects tensor handles,
@@ -205,8 +223,7 @@ class Telemetry:
         # Flag unexpected cache misses: request had enough tokens to cache
         # but got zero cache reads. Skip first request per session (cold start).
         if usage and status == 200 and s.request_count > 1:
-            effective = cache_read + cache_create + usage.get("input_tokens", 0)
-            if effective > 4096 and cache_read == 0 and cache_create > 0:
+            if effective_tokens > 4096 and cache_read == 0 and cache_create > 0:
                 CACHE_MISS_EVENTS.labels(provider=provider).inc()
                 self.emit(
                     "cache_miss_unexpected",
@@ -214,9 +231,33 @@ class Telemetry:
                     session_id=session_id,
                     provider=provider,
                     model=model,
-                    effective_tokens=effective,
+                    effective_tokens=effective_tokens,
                     cache_create_tokens=cache_create,
                 )
+
+    def cost_summary(self, window_seconds: int | None = None) -> dict[str, Any]:
+        events = self.recent_events(window_seconds)
+        req = [e for e in events if e.get("type") == "request_metrics"]
+        if not req:
+            return {
+                "requests": 0,
+                "avg_cache_read_pct": 0.0,
+                "zero_cache_read_requests": 0,
+                "avg_effective_tokens": 0.0,
+                "avg_miss_penalty_tokens_est": 0.0,
+                "avg_size_saved_tokens_est": 0.0,
+                "avg_net_token_value_est": 0.0,
+            }
+        n = len(req)
+        return {
+            "requests": n,
+            "avg_cache_read_pct": round(sum(float(e.get("cache_read_pct", 0.0)) for e in req) / n, 2),
+            "zero_cache_read_requests": sum(1 for e in req if float(e.get("cache_read_tokens", 0.0)) == 0.0),
+            "avg_effective_tokens": round(sum(float(e.get("effective_tokens", 0.0)) for e in req) / n, 1),
+            "avg_miss_penalty_tokens_est": round(sum(float(e.get("miss_penalty_tokens_est", 0.0)) for e in req) / n, 1),
+            "avg_size_saved_tokens_est": round(sum(float(e.get("size_saved_tokens_est", 0.0)) for e in req) / n, 1),
+            "avg_net_token_value_est": round(sum(float(e.get("net_token_value_est", 0.0)) for e in req) / n, 1),
+        }
 
     def get_metrics(self) -> bytes:
         return generate_latest()

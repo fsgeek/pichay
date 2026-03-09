@@ -24,6 +24,13 @@ REQUEST_METRICS_REQUIRED = {
     "duplication_score",
     "latency_ms",
     "streaming",
+    "input_tokens",
+    "cache_read_tokens",
+    "cache_create_tokens",
+    "effective_tokens",
+    "miss_penalty_tokens_est",
+    "size_saved_tokens_est",
+    "net_token_value_est",
 }
 
 POLICY_CONFLICT_REQUIRED = {
@@ -266,3 +273,47 @@ def test_smoke_both_provider_routes_emit_metrics(tmp_path: Path):
     req = [e for e in app.state.telemetry.recent_events() if e.get("type") == "request_metrics"]
     providers = {e["provider"] for e in req}
     assert providers == {"anthropic", "openai"}
+
+
+def test_cost_summary_endpoint_shape(tmp_path: Path):
+    app = create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=False,
+        enable_trim=False,
+        min_evict_size=500,
+        process_session_id="proc_contract",
+    )
+    app.state.clients["anthropic"] = _FakeNonStreamClient(httpx.Response(200, json={
+        "id": "a",
+        "usage": {
+            "input_tokens": 1000,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 900,
+        },
+    }))
+    client = TestClient(app)
+    _ = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-test",
+            "max_tokens": 16,
+            "stream": False,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    resp = client.get("/api/cost?window=1h")
+    assert resp.status_code == 200
+    body = resp.json()
+    for key in (
+        "requests",
+        "avg_cache_read_pct",
+        "zero_cache_read_requests",
+        "avg_effective_tokens",
+        "avg_miss_penalty_tokens_est",
+        "avg_size_saved_tokens_est",
+        "avg_net_token_value_est",
+    ):
+        assert key in body

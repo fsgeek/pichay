@@ -471,6 +471,8 @@ def create_app(
     enable_trim: bool = True,
     min_evict_size: int = 500,
     token_cap: int = 0,
+    anthropic_model_override: str | None = None,
+    openai_model_override: str | None = None,
     process_session_id: str | None = None,
 ) -> FastAPI:
     clients: dict[str, httpx.Client] = {}
@@ -543,6 +545,10 @@ def create_app(
             "providers": ["anthropic", "openai"],
             "log_path": str(log_path),
             "token_cap": token_cap,
+            "model_overrides": {
+                "anthropic": anthropic_model_override,
+                "openai": openai_model_override,
+            },
             "sessions": session_summaries,
         }
 
@@ -592,6 +598,16 @@ def create_app(
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
         return {"events": telemetry.recent_events(window_seconds)}
+
+    @app.get("/api/cost")
+    def api_cost(window: str | None = None) -> dict[str, Any]:
+        window_seconds = None
+        if window:
+            try:
+                window_seconds = parse_duration(window)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        return telemetry.cost_summary(window_seconds)
 
     @app.get("/dashboard")
     def dashboard() -> HTMLResponse:
@@ -774,6 +790,12 @@ def create_app(
         # Pre-process: system status, block labeling
         if endpoint == "messages":
             payload = _preprocess(payload, session)
+
+        # Optional provider-level model override for cost-controlled runs.
+        if provider == "anthropic" and anthropic_model_override:
+            payload["model"] = anthropic_model_override
+        elif provider == "openai" and openai_model_override:
+            payload["model"] = openai_model_override
 
         adapter = app.state.adapters[provider]
         client: httpx.Client = app.state.clients[provider]
@@ -1023,6 +1045,10 @@ def main() -> None:
     parser.add_argument("--anthropic-upstream", default="https://api.anthropic.com")
     parser.add_argument("--openai-upstream", default="https://api.openai.com")
     parser.add_argument("--token-cap", type=int, default=0, help="Token cap (0=unlimited)")
+    parser.add_argument("--anthropic-model-override", default=None,
+                        help="Force Anthropic model ID for all Anthropic requests")
+    parser.add_argument("--openai-model-override", default=None,
+                        help="Force OpenAI model ID for all OpenAI requests")
     parser.add_argument("--disable-paging", action="store_true")
     parser.add_argument("--disable-trim", action="store_true")
     parser.add_argument("--min-evict-size", type=int, default=500)
@@ -1049,6 +1075,8 @@ def main() -> None:
         enable_trim=not args.disable_trim,
         min_evict_size=args.min_evict_size,
         token_cap=args.token_cap,
+        anthropic_model_override=args.anthropic_model_override,
+        openai_model_override=args.openai_model_override,
     )
 
     if args.no_launch:

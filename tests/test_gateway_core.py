@@ -533,6 +533,58 @@ def test_internal_headers_not_forwarded_in_body(tmp_path: Path):
     assert "_headers" not in (cap.last_json or {})
 
 
+def test_anthropic_model_override_applied(tmp_path: Path):
+    app = create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=False,
+        enable_trim=False,
+        min_evict_size=500,
+        anthropic_model_override="claude-haiku-4-5",
+        process_session_id="proc_test",
+    )
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["anthropic"] = cap
+    client = TestClient(app)
+    resp = client.post("/v1/messages", json={
+        "model": "claude-opus-4-6",
+        "max_tokens": 64,
+        "stream": False,
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert resp.status_code == 200
+    assert cap.last_json is not None
+    assert cap.last_json.get("model") == "claude-haiku-4-5"
+
+
+def test_openai_model_override_applied(tmp_path: Path):
+    app = create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=False,
+        enable_trim=False,
+        min_evict_size=500,
+        openai_model_override="gpt-4o-mini",
+        process_session_id="proc_test",
+    )
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["openai"] = cap
+    client = TestClient(app)
+    resp = client.post("/v1/chat/completions", json={
+        "model": "gpt-4.1",
+        "max_tokens": 64,
+        "stream": False,
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert resp.status_code == 200
+    assert cap.last_json is not None
+    assert cap.last_json.get("model") == "gpt-4o-mini"
+
+
 def test_compacted_tool_result_preserves_anthropic_schema(tmp_path: Path):
     app = create_app(
         log_dir=tmp_path,
