@@ -135,6 +135,58 @@ def parse_cleanup_tags(text: str) -> CleanupOps:
     return ops
 
 
+# Match <yuyay-response>...</yuyay-response> blocks
+_YUYAY_RESPONSE_PATTERN = re.compile(
+    r"<yuyay-response>\s*(.*?)\s*</yuyay-response>",
+    re.DOTALL,
+)
+
+# Match structured eviction decisions: <release handle="abc123"/>
+_YUYAY_RELEASE = re.compile(r'<release\s+handle="([a-f0-9]{8,12})"')
+# Match structured retain (logged but no action needed)
+_YUYAY_RETAIN = re.compile(r'<retain\s+handle="([a-f0-9]{8,12})"')
+
+
+def parse_yuyay_response(text: str) -> CleanupOps:
+    """Extract memory operations from <yuyay-response> blocks.
+
+    The model responds to <yuyay-query> with structured eviction
+    decisions. These are converted to CleanupOps for execution
+    through the same pipeline as <memory_cleanup> tags.
+
+    Supports two formats:
+    - Structured XML: <release handle="abc123"/>
+    - Prose with release directives: release: tensor:abc123
+    """
+    ops = CleanupOps()
+
+    for match in _YUYAY_RESPONSE_PATTERN.finditer(text):
+        body = match.group(1)
+
+        # Try structured XML format first
+        for m in _YUYAY_RELEASE.finditer(body):
+            ops.releases.append(m.group(1))
+
+        # Also try the prose release format (same as cleanup tags)
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = _RELEASE_PATTERN.match(line)
+            if m:
+                paths = [p.strip() for p in m.group(1).split(",") if p.strip()]
+                ops.releases.extend(paths)
+
+    return ops
+
+
+def strip_yuyay_tags(text: str) -> str:
+    """Remove <yuyay-response> blocks from model output."""
+    result = _YUYAY_RESPONSE_PATTERN.sub("", text)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip() if result.strip() != text.strip() else result
+
+
 def strip_cleanup_tags(text: str) -> str:
     """Remove all <memory_cleanup>...</memory_cleanup> tags from text.
 

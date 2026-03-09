@@ -1,6 +1,12 @@
 """Tests for cleanup tag parser."""
 
-from pichay.tags import CleanupOps, parse_cleanup_tags, strip_cleanup_tags
+from pichay.tags import (
+    CleanupOps,
+    parse_cleanup_tags,
+    parse_yuyay_response,
+    strip_cleanup_tags,
+    strip_yuyay_tags,
+)
 
 
 class TestParseCleanupTags:
@@ -139,3 +145,47 @@ class TestCleanupOps:
 
     def test_str_empty(self):
         assert str(CleanupOps()) == "no-ops"
+
+
+class TestParseYuyayResponse:
+    """Test parsing of <yuyay-response> blocks."""
+
+    def test_parse_structured_release(self):
+        text = (
+            "Intro text.\n"
+            "<yuyay-response>\n"
+            '  <release handle="abc123ef"/>\n'
+            "</yuyay-response>\n"
+        )
+        ops = parse_yuyay_response(text)
+        assert ops.releases == ["abc123ef"]
+
+    def test_parse_prose_release_directive(self):
+        text = (
+            "<yuyay-response>\n"
+            "release: tensor:feedcafe, src/cache/index.py\n"
+            "</yuyay-response>"
+        )
+        ops = parse_yuyay_response(text)
+        assert ops.releases == ["tensor:feedcafe", "src/cache/index.py"]
+
+    def test_parse_returns_empty_when_absent(self):
+        ops = parse_yuyay_response("Model reply without directives.")
+        assert ops.empty
+
+
+class TestStripYuyayTags:
+    """Test stripping of <yuyay-response> tags."""
+
+    def test_strip_removes_yuyay_response_block(self):
+        text = (
+            "Before text.\n\n"
+            "<yuyay-response>\n"
+            "release: tensor:f00dbabe\n"
+            "</yuyay-response>\n\n"
+            "After text."
+        )
+        result = strip_yuyay_tags(text)
+        assert "<yuyay-response>" not in result
+        assert "Before text." in result
+        assert "After text." in result

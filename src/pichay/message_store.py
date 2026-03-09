@@ -1,13 +1,22 @@
-"""MessageStore — Pichay's own compacted conversation history.
+"""MessageStore — Pichay's gateway conversation store.
 
-Instead of proxying Claude Code's full message array each turn,
-the gateway maintains its own version where old tool results have
-been replaced with tensor-handle stubs. Only this version is sent
-to the upstream API.
+The gateway maintains its own physical message store, decoupled from
+Claude Code's message array.  The physical store is what goes to the
+upstream API.  Claude Code's mutations (system-reminder re-injections)
+and deletions (compaction) are logged but do NOT propagate to the
+physical store.
 
-Claude Code's message array is append-only: messages are never
-modified, deleted, or reordered. We assert this invariant on each
-ingest and log violations for debugging.
+Architecture (the page table):
+  - _messages: physical store (Pichay-owned, stable, sent to API)
+  - _fingerprints: physical store fingerprints at ingest time
+  - _client_fps: tracks what the client sent last turn (for mutation detection)
+  - _client_to_physical: maps client indices to physical indices
+    (diverges after client deletions)
+
+Claude Code deletions are a no-op on the physical store.  The pager
+manages eviction independently via compact_messages().  This eliminates
+the "double KV cache tax" where client compaction and pager eviction
+each independently invalidated the API-side cache prefix.
 """
 
 from __future__ import annotations
@@ -85,18 +94,40 @@ class MessageStore:
         self.session_id = session_id
         self.page_store = page_store
         self.log_path = log_path
-        # Our compacted message list — this is what goes to the API
+        # Physical store — Pichay-owned, sent to API, stable
         self._messages: list[dict] = []
-        # Fingerprints of known messages for append-only assertion
+        # Fingerprints of physical messages at ingest time
         self._fingerprints: list[str] = []
+        # Client tracking — separate from physical store
+        self._client_fps: list[str] = []  # client's current fingerprints
+        self._client_to_physical: list[int] = []  # client idx -> physical idx
         # Stats
         self.total_ingested: int = 0
         self.total_mutations: int = 0
         self.total_deletions: int = 0
+        self.total_client_deletions_absorbed: int = 0
         self._turn: int = 0
 
+    @staticmethod
+    def _content_size(msg: dict) -> int:
+        """Approximate byte size of a message's content."""
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return len(json.dumps(content, default=str))
+        return len(str(content))
+
+    @staticmethod
+    def _content_preview(msg: dict, limit: int = 500) -> str:
+        """Extract a content preview string from a message."""
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return json.dumps(content, default=str)[:limit]
+        return str(content)[:limit]
+
     def _log_violation(self, kind: str, index: int, msg: dict | None,
-                       expected_fp: str, actual_fp: str) -> None:
+                       expected_fp: str, actual_fp: str,
+                       old_msg: dict | None = None,
+                       deleted_msgs: list[dict] | None = None) -> None:
         """Log append-only violations to file for later analysis."""
         if self.log_path is None:
             return
@@ -112,11 +143,22 @@ class MessageStore:
         }
         if msg is not None:
             record["role"] = msg.get("role", "")
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                record["content_preview"] = json.dumps(content, default=str)[:500]
-            else:
-                record["content_preview"] = str(content)[:500]
+            record["new_size"] = self._content_size(msg)
+            record["new_preview"] = self._content_preview(msg)
+        if old_msg is not None:
+            record["old_size"] = self._content_size(old_msg)
+            record["old_preview"] = self._content_preview(old_msg)
+        if deleted_msgs:
+            record["deleted_count"] = len(deleted_msgs)
+            record["deleted_messages"] = [
+                {
+                    "index": index - len(deleted_msgs) + i,
+                    "role": m.get("role", ""),
+                    "size": self._content_size(m),
+                    "preview": self._content_preview(m, limit=200),
+                }
+                for i, m in enumerate(deleted_msgs)
+            ]
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
@@ -137,58 +179,69 @@ class MessageStore:
     ) -> IngestResult:
         """Ingest a new turn's messages from Claude Code.
 
-        Asserts append-only invariant on known messages, extracts
-        new messages, compacts them, and appends to our store.
+        Client tracking (fingerprints, index mapping) is separate from
+        the physical store.  Mutations and deletions update client state
+        only — the physical store stays stable for KV cache coherence.
 
         Returns IngestResult with stats about what happened.
         """
         self._turn += 1
         result = IngestResult()
-        known_count = len(self._fingerprints)
+        client_known = len(self._client_fps)
 
-        # ── Assert append-only on known messages ─────────────────
-        # Check that messages[0:known_count] haven't changed
-        check_limit = min(known_count, len(incoming))
+        # ── Detect mutations in known client messages ────────────
+        check_limit = min(client_known, len(incoming))
         for i in range(check_limit):
             fp = _fingerprint(incoming[i])
-            if fp != self._fingerprints[i]:
+            if fp != self._client_fps[i]:
                 result.mutations_detected += 1
                 self.total_mutations += 1
+                # Look up physical message via mapping for comparison
+                phys_idx = self._client_to_physical[i]
+                old_msg = self._messages[phys_idx] if phys_idx < len(self._messages) else None
                 self._log_violation(
                     "mutation", i, incoming[i],
-                    self._fingerprints[i], fp,
+                    self._client_fps[i], fp,
+                    old_msg=old_msg,
                 )
                 print(
                     f"  {_YELLOW}[{self.session_id}] APPEND-ONLY VIOLATION at index {i}: "
-                    f"expected {self._fingerprints[i][:32]}, "
+                    f"expected {self._client_fps[i][:32]}, "
                     f"got {fp[:32]}{_RESET}",
                     file=sys.stderr,
                 )
-                # Update our copy with the mutated version
-                self._messages[i] = copy.deepcopy(incoming[i])
-                self._fingerprints[i] = fp
+                # Update CLIENT fingerprint only — physical store unchanged
+                self._client_fps[i] = fp
 
-        # Check for deletions (incoming shorter than known)
-        if len(incoming) < known_count:
-            deleted = known_count - len(incoming)
+        # ── Detect client deletions (compaction) ─────────────────
+        if len(incoming) < client_known:
+            deleted = client_known - len(incoming)
             result.deletions_detected = deleted
             self.total_deletions += deleted
+            self.total_client_deletions_absorbed += deleted
+            # Log what the client is deleting (from physical store via mapping)
+            deleted_physical = []
+            for ci in range(len(incoming), client_known):
+                pi = self._client_to_physical[ci]
+                if pi < len(self._messages):
+                    deleted_physical.append(self._messages[pi])
             self._log_violation(
-                "deletion", known_count, None,
-                f"expected_{known_count}", f"got_{len(incoming)}",
+                "deletion", client_known, None,
+                f"expected_{client_known}", f"got_{len(incoming)}",
+                deleted_msgs=deleted_physical,
             )
             print(
-                f"  {_RED}[{self.session_id}] DELETION DETECTED: "
-                f"expected {known_count} messages, got {len(incoming)} "
-                f"({deleted} removed){_RESET}",
+                f"  {_DIM}[{self.session_id}] CLIENT DELETION ABSORBED: "
+                f"{deleted} messages dropped by client, "
+                f"physical store unchanged ({len(self._messages)} msgs){_RESET}",
                 file=sys.stderr,
             )
-            # Truncate our store to match
-            self._messages = self._messages[:len(incoming)]
-            self._fingerprints = self._fingerprints[:len(incoming)]
+            # Truncate CLIENT tracking only — physical store stays intact
+            self._client_fps = self._client_fps[:len(incoming)]
+            self._client_to_physical = self._client_to_physical[:len(incoming)]
 
         # ── Extract and append new messages ──────────────────────
-        new_start = min(known_count, len(incoming))
+        new_start = min(client_known, len(incoming))
         new_messages = incoming[new_start:]
         result.new_count = len(new_messages)
 
@@ -202,16 +255,21 @@ class MessageStore:
             for msg in new_copies:
                 _strip_cache_control(msg)
 
-            # Fingerprint before compaction (originals)
-            for msg in new_messages:
-                self._fingerprints.append(_fingerprint(msg))
+            # Track in physical store and client mapping
+            phys_start = len(self._messages)
+            for j, msg in enumerate(new_messages):
+                fp = _fingerprint(msg)
+                self._fingerprints.append(fp)
+                self._client_fps.append(fp)
+                self._client_to_physical.append(phys_start + j)
 
-            # Append to our store
+            # Append to physical store
             self._messages.extend(new_copies)
             self.total_ingested += len(new_copies)
 
-        # ── Compact our entire store ─────────────────────────────
-        # Age-based eviction runs on OUR messages, not Claude Code's
+        # ── Compact physical store ───────────────────────────────
+        # Age-based eviction runs on OUR messages, not Claude Code's.
+        # This is the only thing that modifies the physical store.
         compact_stats = compact_messages(
             self._messages,
             age_threshold=age_threshold,
