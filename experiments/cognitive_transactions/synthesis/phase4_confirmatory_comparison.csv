@@ -1,0 +1,7 @@
+task,max_tokens_profile,baseline_valid_rate,confirmatory_valid_rate,delta_valid_rate_pp,baseline_valid_steps,baseline_steps,confirmatory_valid_steps,confirmatory_steps,baseline_truncations_total,confirmatory_truncations_total,baseline_content_filters_total,confirmatory_content_filters_total
+failure_recovery,2000,0.8,0.7333333333333333,-6.666666666666677,12,15,11,15,0,0,0,0
+failure_recovery,4000,1.0,0.8,-19.999999999999996,15,15,12,15,0,0,0,0
+long_horizon_durability,2000,0.8666666666666667,0.8333333333333334,-3.3333333333333326,26,30,25,30,0,0,0,0
+long_horizon_durability,4000,0.8333333333333334,0.8333333333333334,0.0,25,30,25,30,0,0,0,0
+multitask_benchmark,2000,0.7222222222222222,0.6666666666666666,-5.555555555555558,13,18,12,18,0,0,0,0
+multitask_benchmark,4000,0.6666666666666666,0.7222222222222222,5.555555555555558,12,18,13,18,0,0,0,0

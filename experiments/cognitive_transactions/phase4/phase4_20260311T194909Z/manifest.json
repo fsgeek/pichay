@@ -1,0 +1,55 @@
+{
+  "experiment_type": "phase4",
+  "generated_at": "2026-03-11T19:49:19.494454+00:00",
+  "model": "allenai/olmo-3.1-32b-instruct",
+  "tasks": [
+    "failure_recovery"
+  ],
+  "replicates": 1,
+  "seed_base": 5000,
+  "provider": "openrouter",
+  "openrouter_base_url": "https://openrouter.ai/api/v1",
+  "openrouter_app": "pichay-phase4",
+  "openrouter_api_key_env": "OPENROUTER_API_KEY",
+  "timeouts": {
+    "timeout": 35.0,
+    "request_hard_timeout": 120.0,
+    "max_retries": 3
+  },
+  "decode_config": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_token_profiles": [
+      8000
+    ]
+  },
+  "working_set": {
+    "handle_bytes": 5000
+  },
+  "handles": {
+    "failure_recovery": {
+      "unit-09": {
+        "hash_sha256": "25aba858e8adbd5fb20a46a55d480996ed45e5a93d95233468c9f3782e36f626",
+        "size_bytes": 5091
+      },
+      "unit-10": {
+        "hash_sha256": "5b36a8d0b97217dc7077cf28d7670aced13446f7f261331e15a9073912733cf5",
+        "size_bytes": 2587
+      }
+    }
+  },
+  "paths": {
+    "run_summary": "experiments/cognitive_transactions/phase4/phase4_20260311T194909Z/phase4_run_summary.json",
+    "aggregate": "experiments/cognitive_transactions/phase4/phase4_20260311T194909Z/phase4_aggregate.json"
+  },
+  "git": {
+    "commit": "890d04af56cc700d656919d28517dda4c2f7c586",
+    "dirty": true,
+    "branch": "exp4"
+  },
+  "script_hashes": {
+    "/home/tony/projects/pichay/tools/phase4_olmo3_eval.py": "963fd22f03e70c9ed81ed0f5c9adb9b98e169da1b578bdbc01c1fda290634318",
+    "/home/tony/projects/pichay/tools/cognitive_step_harness.py": "e1c14dd67b8bad14a72732161e749b24d1c08a5019ae70bda62b356a0ebab0b9",
+    "/home/tony/projects/pichay/tools/repro_meta.py": "8bc33629228ceef9b951b2156277ac7bb975bca8c91fc72e133624d9104158fc"
+  }
+}

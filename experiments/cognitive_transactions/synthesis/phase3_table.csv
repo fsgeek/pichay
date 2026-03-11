@@ -1,0 +1,5 @@
+phase,model,condition,replicates,steps_total,valid_steps_total,valid_rate,valid_rate_pct,required_op_misses_total,semantic_rejections_total
+phase3,allenai/olmo-3.1-32b-instruct,synthetic,3,15,13,0.8666666666666667,86.7%,0,1
+phase3,allenai/olmo-3.1-32b-instruct,synthetic_reduced,3,15,1,0.06666666666666667,6.7%,6,14
+phase3,allenai/olmo-3.1-32b-instruct,synthetic_followup,5,25,23,0.92,92.0%,0,1
+phase3,allenai/olmo-3.1-32b-instruct,synthetic_followup_tweak,10,50,50,1.0,100.0%,0,0

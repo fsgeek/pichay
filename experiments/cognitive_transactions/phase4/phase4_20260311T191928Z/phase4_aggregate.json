@@ -1,0 +1,21 @@
+[
+  {
+    "task": "failure_recovery",
+    "task_description": "Explicit recovery after validator-like failure signal.",
+    "max_tokens_profile": 8000,
+    "replicates": 1,
+    "steps_total": 5,
+    "valid_steps_total": 3,
+    "required_op_misses_total": 1,
+    "semantic_rejections_total": 1,
+    "content_filters_total": 0,
+    "truncations_total": 0,
+    "latency_total_s": 10.436,
+    "prompt_tokens_total": 7471,
+    "completion_tokens_total": 581,
+    "total_tokens_total": 8052,
+    "valid_rate": 0.6,
+    "latency_mean_s": 2.0872,
+    "tokens_per_valid_step": 2684.0
+  }
+]

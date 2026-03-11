@@ -1,0 +1,23 @@
+[
+  {
+    "task": "failure_recovery",
+    "task_description": "Explicit recovery after validator-like failure signal.",
+    "replicate": 1,
+    "seed": 5000,
+    "max_tokens_profile": 4000,
+    "teacher_trace_mode": "synthetic",
+    "log_path": "experiments/cognitive_transactions/phase4/phase4_20260311T185529Z/cognitive_step_v1_treatment_20260311T185529Z-69f7e8cf.jsonl",
+    "steps": 5,
+    "valid_steps": 5,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "content_filters": 0,
+    "truncations": 0,
+    "latency_total_s": 10.556,
+    "latency_mean_s": 2.1111999999999997,
+    "prompt_tokens": 13316,
+    "completion_tokens": 554,
+    "total_tokens": 13870
+  }
+]

@@ -1,0 +1,24 @@
+{
+  "inputs": {
+    "phase2_aggregate": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z/phase2_aggregate.json",
+    "phase2_manifest": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z/manifest.json",
+    "phase3_aggregate": "experiments/cognitive_transactions/phase3/phase3_20260311T163854Z/phase3_aggregate.json",
+    "phase3_followup_aggregate": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/phase3_synthetic_followup_aggregate.json",
+    "phase3_tweak_aggregate": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_tweak_20260311T170427Z/phase3_synthetic_followup_tweak_aggregate.json",
+    "phase4_aggregate": "experiments/cognitive_transactions/phase4/phase4_20260311T173018Z/phase4_aggregate.json",
+    "phase4_manifest": "experiments/cognitive_transactions/phase4/phase4_20260311T173018Z/manifest.json"
+  },
+  "outputs": {
+    "phase2_table": "experiments/cognitive_transactions/synthesis/phase2_table.csv",
+    "phase3_table": "experiments/cognitive_transactions/synthesis/phase3_table.csv",
+    "phase4_table": "experiments/cognitive_transactions/synthesis/phase4_table.csv",
+    "phase4_budget_delta": "experiments/cognitive_transactions/synthesis/phase4_budget_delta.csv",
+    "synthesis_markdown": "experiments/cognitive_transactions/synthesis/synthesis.md"
+  },
+  "phase2_models": [
+    "inception/mercury-2",
+    "moonshotai/kimi-k2.5",
+    "meta-llama/llama-4-maverick",
+    "allenai/olmo-3.1-32b-instruct"
+  ]
+}

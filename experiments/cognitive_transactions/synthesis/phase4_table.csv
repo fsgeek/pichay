@@ -1,0 +1,7 @@
+phase,task,max_tokens_profile,replicates,steps_total,valid_steps_total,valid_rate,valid_rate_pct,required_op_misses_total,semantic_rejections_total,truncations_total,content_filters_total,tokens_per_valid_step
+phase4,failure_recovery,2000,3,15,12,0.8,80.0%,0,1,0,0,1875.6666666666667
+phase4,failure_recovery,4000,3,15,15,1.0,100.0%,0,0,0,0,1497.0666666666666
+phase4,long_horizon_durability,2000,3,30,26,0.8666666666666667,86.7%,0,1,0,0,1755.076923076923
+phase4,long_horizon_durability,4000,3,30,25,0.8333333333333334,83.3%,0,0,0,0,1813.04
+phase4,multitask_benchmark,2000,3,18,13,0.7222222222222222,72.2%,0,3,0,0,2105.076923076923
+phase4,multitask_benchmark,4000,3,18,12,0.6666666666666666,66.7%,0,3,0,0,2280.3333333333335

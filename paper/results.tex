@@ -390,3 +390,108 @@ model infers the recovery mechanism from the text of the summary
 alone.
 
 % ====================================================================
+
+\subsection{Cognitive Transaction Protocol Evaluation}
+\label{sec:cognitive-transactions}
+
+In a separate experiment track, we evaluate whether a model can operate
+as a bounded cognitive transaction engine under an explicit
+validator/reducer contract. The paper-ready tables are generated from
+versioned artifacts under
+\texttt{experiments/cognitive\_transactions/synthesis/}.
+
+\paragraph{Phase 2: Candidate viability under protocol induction.}
+Table~\ref{tab:ct-phase2} reports per-model validity with and without
+synthetic teacher-trace guidance.
+
+\begin{table}[ht]
+\centering
+\caption{Cognitive transactions Phase 2 (3 replicates, 15 steps per condition).}
+\label{tab:ct-phase2}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Model} & \textbf{Valid \% (none)} & \textbf{Valid \% (synthetic)} \\
+\midrule
+inception/mercury-2 & 6.7 & 100.0 \\
+meta-llama/llama-4-maverick & 0.0 & 100.0 \\
+allenai/olmo-3.1-32b-instruct & 0.0 & 100.0 \\
+moonshotai/kimi-k2.5 & 0.0 & 73.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The main result is an induction gap: under synthetic guidance, three of
+four candidates reach 100\% valid transitions; without guidance, three of
+four collapse to 0\% validity.
+
+\paragraph{Phase 3: Guidance ablation and contract tightening.}
+Table~\ref{tab:ct-phase3} shows that reduced guidance causes an abrupt
+drop for OLMo-3 (86.7\% $\rightarrow$ 6.7\%), while focused contract
+tightening recovers legality to 100\% in a larger retest.
+
+\begin{table}[ht]
+\centering
+\caption{Cognitive transactions Phase 3 (OLMo-3).}
+\label{tab:ct-phase3}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Condition} & \textbf{Steps} & \textbf{Valid} & \textbf{Valid \%} & \textbf{Req-op misses} \\
+\midrule
+synthetic & 15 & 13 & 86.7 & 0 \\
+synthetic\_reduced & 15 & 1 & 6.7 & 6 \\
+synthetic\_followup & 25 & 23 & 92.0 & 0 \\
+synthetic\_followup\_tweak & 50 & 50 & 100.0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Phase 4a: Realism and completion-budget interaction.}
+Table~\ref{tab:ct-phase4} reports the corrected realism run
+(\texttt{phase4\_20260311T173018Z}). No truncation or content-filter
+events occurred in this run. The 2000 vs.~4000 setting is the per-step
+completion token cap (\texttt{max\_tokens}), not the model context
+window. Under this setting, task-dependent variations emerge:
+4000 improves failure recovery, while 2000 performs better on long-horizon
+durability and multitask contradiction reconciliation.
+
+\begin{table}[ht]
+\centering
+\caption{Cognitive transactions Phase 4: working-set realism under induced handle recall (3 replicates per task/profile).}
+\label{tab:ct-phase4}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Task} & \textbf{Valid \% @2000} & \textbf{Valid \% @4000} & \textbf{Delta (2000-4000)} \\
+\midrule
+failure\_recovery & 80.0 & 100.0 & -20.0 \\
+long\_horizon\_durability & 86.7 & 83.3 & +3.3 \\
+multitask\_benchmark & 72.2 & 66.7 & +5.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This section supports a bounded claim: capability is real under protocol
+scaffolding, but multitask contradiction handling remains the current
+boundary and should be reported as a limitation.
+
+A confirmatory rerun on 2026-03-11 (\texttt{phase4\_20260311T181454Z})
+demonstrates run-to-run variance in cognitive transaction success while
+preserving the same qualitative boundary. Relative to the corrected baseline
+(\texttt{phase4\_20260311T173018Z}),
+validity shifted by $-20.0$~points for failure\_recovery@4000
+(100.0\%\,$\rightarrow$\,80.0\%) and $+5.6$~points for multitask\_benchmark@4000
+(66.7\%\,$\rightarrow$\,72.2\%), with truncation/content-filter totals
+remaining zero across all task/profile pairs.
+
+\paragraph{Phase 4b: Working-set realism via handle recall.}
+Separately, we implement a working-set realism mode where evicted handles
+have explicit payload identity (hash, size) and \texttt{memory\_fault}
+restores the full payload into the next-step input state. This enables
+controlled working-set sweeps by varying evicted handle payload size
+(\texttt{handle\_bytes}) while keeping completion caps high to avoid
+structured-output truncation. A representative run with
+\texttt{handle\_bytes}=5000 (\texttt{phase4\_20260311T194940Z}) reports
+non-trivial recall volume alongside task success, making working-set usage
+auditable in tokens and bytes.

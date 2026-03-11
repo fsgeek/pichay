@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _hash_unit(unit: dict[str, Any]) -> dict[str, Any]:
+    """Compute sha256 hash and size for a unit object.
+
+    Returns {"hash_sha256": str, "size_bytes": int}.
+    Used for point-in-time verification of paged objects.
+    """
+    payload = json.dumps(unit, ensure_ascii=True, sort_keys=True)
+    size_bytes = len(payload.encode('utf-8'))
+    hash_hex = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    return {"hash_sha256": hash_hex, "size_bytes": size_bytes}
+
+
 def _extract_json(text: str) -> dict[str, Any] | None:
     text = text.strip()
     if not text:
@@ -91,8 +104,10 @@ def _build_contract(step: dict[str, Any]) -> dict[str, Any]:
     workspace = step.get("workspace", {}) if isinstance(step.get("workspace"), dict) else {}
     resident_units = workspace.get("resident_units", []) if isinstance(workspace.get("resident_units"), list) else []
     evicted_handles = workspace.get("evicted_handles", []) if isinstance(workspace.get("evicted_handles"), list) else []
+    handle_store = workspace.get("handle_store", {}) if isinstance(workspace.get("handle_store"), dict) else {}
     resident_ids = [u.get("id") for u in resident_units if isinstance(u, dict) and isinstance(u.get("id"), str)]
     evicted_ids = [x for x in evicted_handles if isinstance(x, str)]
+    available_fault_ids = [x for x in evicted_ids if x in handle_store]
 
     return {
         "required_top_level": [
@@ -109,11 +124,14 @@ def _build_contract(step: dict[str, Any]) -> dict[str, Any]:
             "required_ops": assertions.get("require_ops", []) if isinstance(assertions.get("require_ops"), list) else [],
             "memory_release_allowed_ids": resident_ids,
             "memory_fault_allowed_ids": evicted_ids,
+            # If handle_store is present, only these ids can be faulted back as full payloads.
+            "memory_fault_available_ids": available_fault_ids,
         },
         "legality_rules": [
             "Do not emit step_kind=halt when halt_allowed is false.",
             "memory_release ids must be chosen only from memory_release_allowed_ids.",
             "memory_fault ids must be chosen only from memory_fault_allowed_ids.",
+            "If memory_fault_available_ids is non-empty, prefer ids from memory_fault_available_ids (available for full restore).",
         ],
     }
 
@@ -194,6 +212,10 @@ def _validate_actions(
 
     pre_units = _workspace_unit_ids(workspace_before)
     pre_evicted = _workspace_evicted_ids(workspace_before)
+    handle_store = workspace_before.get("handle_store", {})
+    handle_store_ids: set[str] | None = None
+    if isinstance(handle_store, dict) and handle_store:
+        handle_store_ids = {k for k in handle_store.keys() if isinstance(k, str)}
 
     def validate_item(item: Any, idx: int, bucket: str) -> dict[str, Any] | None:
         if not isinstance(item, dict):
@@ -251,6 +273,10 @@ def _validate_actions(
                 if unit_id not in pre_evicted:
                     rejections.append(_reject(idx, item, FAIL_MEMORY, f"cannot fault non-evicted unit: {unit_id}", bucket))
                     return None
+                # Scientific rigor: if a handle store exists, require that faulted ids exist in it.
+                if handle_store_ids is not None and unit_id not in handle_store_ids:
+                    rejections.append(_reject(idx, item, FAIL_MEMORY, f"cannot fault missing handle payload: {unit_id}", bucket))
+                    return None
 
         return item
 
@@ -277,6 +303,11 @@ def _reduce_workspace(
     next_ws = json.loads(json.dumps(workspace))
     resident = next_ws.setdefault("resident_units", [])
     evicted = next_ws.setdefault("evicted_handles", [])
+    handle_store = next_ws.setdefault("handle_store", {})
+    if not isinstance(handle_store, dict):
+        # Be robust to older workspaces that did not include handle_store.
+        handle_store = {}
+        next_ws["handle_store"] = handle_store
 
     by_id = {
         u.get("id"): u
@@ -321,19 +352,31 @@ def _reduce_workspace(
         op = item.get("op")
         if op == "memory_release":
             ids = item.get("ids", [])
+            released_handles: dict[str, dict[str, Any]] = {}
             for unit_id in ids:
+                # Persist full unit content for later fault-back (working-set realism).
+                unit = by_id.get(unit_id)
+                if isinstance(unit_id, str) and isinstance(unit, dict):
+                    handle_store[unit_id] = json.loads(json.dumps(unit))
+                    # Compute and record hash/size at release time for verifiable paging identity.
+                    released_handles[unit_id] = _hash_unit(unit)
                 if unit_id not in evicted:
                     evicted.append(unit_id)
                 resident[:] = [u for u in resident if u.get("id") != unit_id]
                 by_id.pop(unit_id, None)
-            committed.append({"bucket": "memory", "op": op, "ids": ids, "applied": True})
+            committed.append({"bucket": "memory", "op": op, "ids": ids, "handles": released_handles, "applied": True})
         elif op == "memory_fault":
             ids = item.get("ids", [])
             for unit_id in ids:
                 if unit_id in evicted:
                     evicted.remove(unit_id)
                 if unit_id not in by_id:
-                    unit = {"id": unit_id, "type": "faulted_unit", "content": "[faulted back]"}
+                    restored = None
+                    if isinstance(unit_id, str):
+                        candidate = handle_store.get(unit_id)
+                        if isinstance(candidate, dict) and isinstance(candidate.get("id"), str):
+                            restored = json.loads(json.dumps(candidate))
+                    unit = restored or {"id": unit_id, "type": "faulted_unit", "content": "[faulted back]"}
                     resident.append(unit)
                     by_id[unit_id] = unit
             committed.append({"bucket": "memory", "op": op, "ids": ids, "applied": True})
@@ -785,6 +828,13 @@ def _single_agent_paging_scenario(mode: str = "treatment") -> list[dict[str, Any
             {"id": "unit-05", "type": "summary", "content": "Old meeting notes"},
         ],
         "evicted_handles": ["unit-09"],
+        "handle_store": {
+            "unit-09": {
+                "id": "unit-09",
+                "type": "baseline",
+                "content": "Baseline record (unit-09). Recovered on fault.",
+            }
+        },
         "focus": ["unit-01", "unit-02"],
         "memory_budget_units": 3,
     }
@@ -1358,6 +1408,33 @@ def run_experiment(
                 "rejected": shape_rejections + semantic_rejections,
             }
 
+            # Recall accounting: measure how much material was faulted back in.
+            fault_ids: list[str] = []
+            for mem in accepted_memory:
+                if mem.get("op") == "memory_fault" and isinstance(mem.get("ids"), list):
+                    fault_ids.extend([x for x in mem["ids"] if isinstance(x, str)])
+            fault_ids = list(dict.fromkeys(fault_ids))
+
+            recalled_chars = 0
+            recalled_json_chars = 0
+            if fault_ids:
+                by_after = {
+                    u.get("id"): u
+                    for u in (workspace_after.get("resident_units", []) if isinstance(workspace_after, dict) else [])
+                    if isinstance(u, dict) and isinstance(u.get("id"), str)
+                }
+                for uid in fault_ids:
+                    unit = by_after.get(uid)
+                    if not isinstance(unit, dict):
+                        continue
+                    content = unit.get("content", "")
+                    if isinstance(content, str):
+                        recalled_chars += len(content)
+                    try:
+                        recalled_json_chars += len(json.dumps(unit, ensure_ascii=True))
+                    except Exception:
+                        pass
+
             ok = (
                 result.response_status < 400
                 and not validation_errors
@@ -1401,6 +1478,11 @@ def run_experiment(
                 "committed_actions": committed_actions,
                 "task_assertion_errors": task_assertion_errors,
                 "recent_fault_ids_before_step": sorted(recent_fault_ttl.keys()),
+                "recall": {
+                    "fault_ids": fault_ids,
+                    "recalled_content_chars": recalled_chars,
+                    "recalled_unit_json_chars": recalled_json_chars,
+                },
                 "scoreboard": scoreboard,
                 "internal_only": (proposed or {}).get("internal_only", []),
                 "external_outputs": (proposed or {}).get("external_outputs", []),

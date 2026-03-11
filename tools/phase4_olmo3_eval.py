@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-import sys
 
 TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
@@ -35,7 +35,34 @@ class Phase4Task:
     description: str
 
 
-def _base_workspace() -> dict[str, Any]:
+def _hash_handles(handle_store: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Compute sha256 hash and size for each handle in the store.
+
+    Returns mapping of handle_id -> {hash, size_bytes}.
+    This creates a verifiable record that the same objects are used across reruns.
+    """
+    hashes = {}
+    for handle_id, unit in handle_store.items():
+        if not isinstance(unit, dict):
+            continue
+        payload = json.dumps(unit, ensure_ascii=True, sort_keys=True)
+        size_bytes = len(payload.encode('utf-8'))
+        hash_hex = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        hashes[handle_id] = {
+            "hash_sha256": hash_hex,
+            "size_bytes": size_bytes,
+        }
+    return hashes
+
+
+def _blob(prefix: str, n: int) -> str:
+    if n <= 0:
+        return prefix
+    # Deterministic filler to scale recalled working-set size.
+    return prefix + "\n" + ("X" * n)
+
+
+def _base_workspace(handle_bytes: int = 0) -> dict[str, Any]:
     return {
         "resident_units": [
             {"id": "unit-01", "type": "goal", "content": "Deliver robust fix proposal"},
@@ -44,6 +71,10 @@ def _base_workspace() -> dict[str, Any]:
             {"id": "unit-04", "type": "summary", "content": "Prior mitigation attempts"},
         ],
         "evicted_handles": ["unit-09", "unit-10"],
+        "handle_store": {
+            "unit-09": {"id": "unit-09", "type": "baseline", "content": _blob("Historical baseline record (unit-09).", handle_bytes)},
+            "unit-10": {"id": "unit-10", "type": "notes", "content": _blob("Secondary evicted context (unit-10).", handle_bytes // 2)},
+        },
         "focus": ["unit-01", "unit-02"],
         "memory_budget_units": 3,
     }
@@ -65,8 +96,8 @@ def _step(events: list[dict[str, Any]], goal: str, assertions: dict[str, Any], w
     }
 
 
-def scenario_multitask_benchmark() -> list[dict[str, Any]]:
-    ws = _base_workspace()
+def scenario_multitask_benchmark(handle_bytes: int = 0) -> list[dict[str, Any]]:
+    ws = _base_workspace(handle_bytes=handle_bytes)
     return [
         _step([{"type": "human_input", "content": "Plan a fix and testing strategy."}], "Create initial plan units.", {"require_non_halt": True, "min_committed_actions": 1}, ws),
         _step([{"type": "tool_result", "content": "New benchmark regression in allocator-heavy workload."}], "Incorporate tool evidence.", {"require_non_halt": True, "min_committed_actions": 1}),
@@ -77,8 +108,8 @@ def scenario_multitask_benchmark() -> list[dict[str, Any]]:
     ]
 
 
-def scenario_long_horizon() -> list[dict[str, Any]]:
-    ws = _base_workspace()
+def scenario_long_horizon(handle_bytes: int = 0) -> list[dict[str, Any]]:
+    ws = _base_workspace(handle_bytes=handle_bytes)
     steps = [
         _step([{"type": "human_input", "content": "Start long-horizon investigation."}], "Initialize hypothesis graph.", {"require_non_halt": True, "min_committed_actions": 1}, ws),
     ]
@@ -95,8 +126,8 @@ def scenario_long_horizon() -> list[dict[str, Any]]:
     return steps
 
 
-def scenario_failure_recovery() -> list[dict[str, Any]]:
-    ws = _base_workspace()
+def scenario_failure_recovery(handle_bytes: int = 0) -> list[dict[str, Any]]:
+    ws = _base_workspace(handle_bytes=handle_bytes)
     return [
         _step([{"type": "human_input", "content": "Begin repair-oriented run."}], "Build first-pass plan.", {"require_non_halt": True, "min_committed_actions": 1}, ws),
         _step([{"type": "scheduler_wakeup", "content": "Pressure triggered."}], "Release memory legally.", {"require_non_halt": True, "require_ops": ["memory_release"]}),
@@ -161,7 +192,9 @@ def main() -> None:
     parser.add_argument("--seed-base", type=int, default=5000)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--max-token-profiles", nargs="+", type=int, default=[4000, 2000])
+    # Completion (output) token cap per step. For structured outputs, keep this high to avoid truncation.
+    parser.add_argument("--max-token-profiles", nargs="+", type=int, default=[8000], help="Completion token caps per step (API max_tokens).")
+    parser.add_argument("--handle-bytes", type=int, default=0, help="Size of recalled handle content (controls working-set size).")
     parser.add_argument("--timeout", type=float, default=35.0)
     parser.add_argument("--request-hard-timeout", type=float, default=120.0)
     parser.add_argument("--max-retries", type=int, default=3)
@@ -186,11 +219,18 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     run_rows: list[dict[str, Any]] = []
+    handle_manifests: dict[str, dict[str, Any]] = {}  # task_name -> handle metadata
 
     for max_tokens in args.max_token_profiles:
         for task_name in task_names:
             task_meta, builder = TASK_BUILDERS[task_name]
-            scenario = builder()
+            scenario = builder(handle_bytes=args.handle_bytes)
+            # Extract and hash the initial handle_store for reproducibility verification.
+            if task_name not in handle_manifests and scenario:
+                workspace = scenario[0].get("workspace") or {}
+                handle_store = workspace.get("handle_store", {})
+                if handle_store:
+                    handle_manifests[task_name] = _hash_handles(handle_store)
             for rep in range(args.replicates):
                 seed = args.seed_base + rep
                 decode_config = {
@@ -308,6 +348,10 @@ def main() -> None:
             "top_p": args.top_p,
             "max_token_profiles": args.max_token_profiles,
         },
+        "working_set": {
+            "handle_bytes": args.handle_bytes,
+        },
+        "handles": handle_manifests,
         "paths": {
             "run_summary": str(run_summary_path),
             "aggregate": str(aggregate_path),

@@ -1,0 +1,4 @@
+task,max_tokens_profile,prompt_tokens_total,fault_count,bytes_recalled,valid_rate,valid_steps,steps_total,replicates
+failure_recovery,8000,40467,3,15273,1.0,15,15,3
+long_horizon_durability,8000,83761,3,15273,0.7333,22,30,3
+multitask_benchmark,8000,48230,3,15273,0.8889,16,18,3

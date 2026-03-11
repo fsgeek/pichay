@@ -1,0 +1,9 @@
+phase,model,condition,replicates,steps_total,valid_steps_total,valid_rate,valid_rate_pct,required_op_misses_total,semantic_rejection_total,output_truncated_total,content_filter_total
+phase2,allenai/olmo-3.1-32b-instruct,none,3,15,0,0.0,0.0%,6,16,0,0
+phase2,allenai/olmo-3.1-32b-instruct,synthetic,3,15,15,1.0,100.0%,0,0,0,0
+phase2,inception/mercury-2,none,3,15,1,0.06666666666666667,6.7%,6,42,0,0
+phase2,inception/mercury-2,synthetic,3,15,15,1.0,100.0%,0,0,0,0
+phase2,meta-llama/llama-4-maverick,none,3,15,0,0.0,0.0%,6,35,0,0
+phase2,meta-llama/llama-4-maverick,synthetic,3,15,15,1.0,100.0%,0,0,0,0
+phase2,moonshotai/kimi-k2.5,none,3,15,0,0.0,0.0%,6,4,5,0
+phase2,moonshotai/kimi-k2.5,synthetic,3,15,11,0.7333333333333333,73.3%,1,0,2,0
