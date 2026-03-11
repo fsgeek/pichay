@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-03-11T16:40:00.806792+00:00",
+  "model": "allenai/olmo-3.1-32b-instruct",
+  "replicates": 3,
+  "conditions": [
+    "synthetic",
+    "synthetic_reduced"
+  ],
+  "max_steps": 5,
+  "decode_config": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_tokens": 4000,
+    "seed_base": 2000
+  },
+  "paths": {
+    "run_summary": "experiments/cognitive_transactions/phase3/phase3_20260311T163854Z/phase3_run_summary.json",
+    "aggregate": "experiments/cognitive_transactions/phase3/phase3_20260311T163854Z/phase3_aggregate.json",
+    "aggregate_csv": "experiments/cognitive_transactions/phase3/phase3_20260311T163854Z/phase3_aggregate.csv"
+  },
+  "ablation_delta": {
+    "valid_rate_delta_reduced_minus_full": -0.8,
+    "required_miss_delta_reduced_minus_full": 6,
+    "fault_use_pass_delta_reduced_minus_full": 0.0,
+    "truncation_delta_reduced_minus_full": 0
+  }
+}

@@ -1,0 +1,3 @@
+condition,replicates,steps_total,valid_steps_total,valid_rate,required_op_misses_total,memory_action_commits_total,semantic_rejections_total,output_truncated_total,content_filter_total,http_error_steps_total,fault_use_checks_total,fault_use_failures_total,fault_use_pass_rate
+synthetic,1,2,2,1.0,0,1,0,0,0,0,0,0,
+synthetic_reduced,1,2,0,0.0,1,0,2,0,0,0,0,0,

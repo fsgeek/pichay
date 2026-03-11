@@ -1,0 +1,9 @@
+model,teacher_trace_mode,replicates,steps_total,valid_steps_total,valid_rate,required_op_misses_total,memory_action_commits_total,semantic_rejection_total,content_filter_total,output_truncated_total,http_error_steps_total,fault_use_checks_total,fault_use_failures_total,fault_use_pass_rate
+allenai/olmo-3.1-32b-instruct,none,3,15,0,0.0,6,20,16,0,0,0,3,0,1.0
+allenai/olmo-3.1-32b-instruct,synthetic,3,15,15,1.0,0,6,0,0,0,0,3,0,1.0
+inception/mercury-2,none,3,15,1,0.06666666666666667,6,0,42,0,0,0,3,0,1.0
+inception/mercury-2,synthetic,3,15,15,1.0,0,9,0,0,0,0,3,0,1.0
+meta-llama/llama-4-maverick,none,3,15,0,0.0,6,3,35,0,0,0,3,0,1.0
+meta-llama/llama-4-maverick,synthetic,3,15,15,1.0,0,9,0,0,0,0,3,0,1.0
+moonshotai/kimi-k2.5,none,3,15,0,0.0,6,0,4,0,5,0,3,0,1.0
+moonshotai/kimi-k2.5,synthetic,3,15,11,0.7333333333333333,1,5,0,0,2,0,3,1,0.6666666666666666

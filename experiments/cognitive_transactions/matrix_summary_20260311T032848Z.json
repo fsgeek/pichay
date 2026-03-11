@@ -1,0 +1,24 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "bytedance-seed/seed-2.0-lite",
+    "teacher_trace_mode": "none",
+    "valid_steps": 0,
+    "total_steps": 5,
+    "required_op_misses": 2,
+    "memory_action_commits": 0,
+    "halt_illegal_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T032402Z-c7ea4e47.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "bytedance-seed/seed-2.0-lite",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 1,
+    "total_steps": 5,
+    "required_op_misses": 2,
+    "memory_action_commits": 0,
+    "halt_illegal_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T032640Z-0809baf4.jsonl"
+  }
+]

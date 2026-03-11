@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-03-11T15:52:44.429075+00:00",
+  "run_dir": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z",
+  "models": [
+    "inception/mercury-2",
+    "moonshotai/kimi-k2.5",
+    "meta-llama/llama-4-maverick",
+    "allenai/olmo-3.1-32b-instruct"
+  ],
+  "replicates": 3,
+  "teacher_traces": [
+    "none",
+    "synthetic"
+  ],
+  "mode": "treatment",
+  "max_steps": 5,
+  "decode_config": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_tokens": 4000,
+    "seed_base": 1000
+  },
+  "run_summary_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z/phase2_run_summary.json",
+  "aggregate_json_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z/phase2_aggregate.json",
+  "aggregate_csv_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150621Z/phase2_aggregate.csv"
+}

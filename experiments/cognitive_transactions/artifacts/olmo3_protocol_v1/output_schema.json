@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cognitive_step_v1.output",
+  "title": "Cognitive Step V1 Output",
+  "type": "object",
+  "required": [
+    "mutations",
+    "memory",
+    "internal_only",
+    "external_outputs",
+    "next_focus",
+    "step_kind"
+  ],
+  "properties": {
+    "mutations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "memory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "internal_only": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "external_outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "next_focus": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "step_kind": {
+      "type": "string",
+      "enum": [
+        "external",
+        "internal",
+        "fault_restore",
+        "halt"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

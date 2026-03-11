@@ -1,0 +1,10 @@
+{
+  "condition": "synthetic_followup",
+  "model": "allenai/olmo-3.1-32b-instruct",
+  "replicates": 5,
+  "steps_total": 25,
+  "valid_steps_total": 23,
+  "valid_rate": 0.92,
+  "required_op_misses_total": 0,
+  "semantic_rejections_total": 1
+}

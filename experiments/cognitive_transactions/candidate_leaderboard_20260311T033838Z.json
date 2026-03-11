@@ -1,0 +1,74 @@
+[
+  {
+    "model": "amazon/nova-2-lite-v1",
+    "score": 36,
+    "classification": "ready",
+    "synthetic_valid": "3/3",
+    "synthetic_required_op_misses": 0,
+    "synthetic_memory_action_commits": 3,
+    "synthetic_semantic_rejections": 0,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033826Z-f58142a2.jsonl"
+  },
+  {
+    "model": "allenai/olmo-3.1-32b-instruct",
+    "score": 34,
+    "classification": "ready",
+    "synthetic_valid": "3/3",
+    "synthetic_required_op_misses": 0,
+    "synthetic_memory_action_commits": 2,
+    "synthetic_semantic_rejections": 0,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033821Z-59da8fef.jsonl"
+  },
+  {
+    "model": "amazon/nova-lite-v1",
+    "score": 24,
+    "classification": "borderline",
+    "synthetic_valid": "2/3",
+    "synthetic_required_op_misses": 0,
+    "synthetic_memory_action_commits": 2,
+    "synthetic_semantic_rejections": 0,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033829Z-00794d81.jsonl"
+  },
+  {
+    "model": "amazon/nova-micro-v1",
+    "score": 20,
+    "classification": "borderline",
+    "synthetic_valid": "2/3",
+    "synthetic_required_op_misses": 1,
+    "synthetic_memory_action_commits": 2,
+    "synthetic_semantic_rejections": 1,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033833Z-c373a6cb.jsonl"
+  },
+  {
+    "model": "ai21/jamba-large-1.7",
+    "score": -6,
+    "classification": "drop",
+    "synthetic_valid": "0/3",
+    "synthetic_required_op_misses": 2,
+    "synthetic_memory_action_commits": 0,
+    "synthetic_semantic_rejections": 0,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033812Z-b6dd457a.jsonl"
+  },
+  {
+    "model": "alibaba/tongyi-deepresearch-30b-a3b",
+    "score": -6,
+    "classification": "drop",
+    "synthetic_valid": "0/3",
+    "synthetic_required_op_misses": 2,
+    "synthetic_memory_action_commits": 0,
+    "synthetic_semantic_rejections": 0,
+    "synthetic_content_filters": 0,
+    "none_valid": null,
+    "synthetic_log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033813Z-38e8799f.jsonl"
+  }
+]

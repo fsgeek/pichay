@@ -1,0 +1,19 @@
+[
+  {
+    "model": "inception/mercury-2",
+    "teacher_trace_mode": "synthetic",
+    "replicates": 1,
+    "steps_total": 1,
+    "valid_steps_total": 0,
+    "valid_rate": 0.0,
+    "required_op_misses_total": 0,
+    "memory_action_commits_total": 0,
+    "semantic_rejection_total": 0,
+    "content_filter_total": 0,
+    "output_truncated_total": 1,
+    "http_error_steps_total": 0,
+    "fault_use_checks_total": 0,
+    "fault_use_failures_total": 0,
+    "fault_use_pass_rate": null
+  }
+]

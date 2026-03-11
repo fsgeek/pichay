@@ -1,0 +1,80 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "ai21/jamba-large-1.7",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 0,
+    "total_steps": 3,
+    "required_op_misses": 2,
+    "memory_action_commits": 0,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033812Z-b6dd457a.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "alibaba/tongyi-deepresearch-30b-a3b",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 0,
+    "total_steps": 3,
+    "required_op_misses": 2,
+    "memory_action_commits": 0,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033813Z-38e8799f.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "allenai/olmo-3.1-32b-instruct",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 3,
+    "total_steps": 3,
+    "required_op_misses": 0,
+    "memory_action_commits": 2,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033821Z-59da8fef.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "amazon/nova-2-lite-v1",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 3,
+    "total_steps": 3,
+    "required_op_misses": 0,
+    "memory_action_commits": 3,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033826Z-f58142a2.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "amazon/nova-lite-v1",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 2,
+    "total_steps": 3,
+    "required_op_misses": 0,
+    "memory_action_commits": 2,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033829Z-00794d81.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "amazon/nova-micro-v1",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 2,
+    "total_steps": 3,
+    "required_op_misses": 1,
+    "memory_action_commits": 2,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 1,
+    "content_filter_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T033833Z-c373a6cb.jsonl"
+  }
+]

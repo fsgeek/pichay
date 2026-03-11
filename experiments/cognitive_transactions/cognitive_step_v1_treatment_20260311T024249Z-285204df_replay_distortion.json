@@ -1,0 +1,30 @@
+{
+  "candidate_log": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T024249Z-285204df.jsonl",
+  "control_log": "experiments/cognitive_transactions/cognitive_step_v1_control_20260311T024229Z-a203e32f.jsonl",
+  "compared_steps": 3,
+  "mean_distortion": 0.0,
+  "per_step": [
+    {
+      "step_index": 1,
+      "resident_jaccard": 1.0,
+      "evicted_jaccard": 1.0,
+      "focus_exact_match": true,
+      "distortion": 0.0
+    },
+    {
+      "step_index": 2,
+      "resident_jaccard": 1.0,
+      "evicted_jaccard": 1.0,
+      "focus_exact_match": true,
+      "distortion": 0.0
+    },
+    {
+      "step_index": 3,
+      "resident_jaccard": 1.0,
+      "evicted_jaccard": 1.0,
+      "focus_exact_match": true,
+      "distortion": 0.0
+    }
+  ],
+  "generated_at": "2026-03-11T02:43:01.740400+00:00"
+}

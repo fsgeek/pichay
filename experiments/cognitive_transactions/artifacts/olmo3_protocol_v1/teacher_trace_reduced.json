@@ -1,0 +1,90 @@
+[
+  {
+    "step_index": 1,
+    "events": [
+      {
+        "type": "human_input",
+        "content": "Curate what matters and reduce memory load."
+      }
+    ],
+    "goal_or_focus": "Curate essential hypothesis/evidence units.",
+    "task_assertions": {
+      "require_non_halt": true,
+      "min_committed_actions": 1
+    },
+    "example_output": {
+      "mutations": [
+        {
+          "op": "update_unit"
+        }
+      ],
+      "memory": [],
+      "internal_only": [],
+      "external_outputs": [],
+      "next_focus": [
+        "unit-01"
+      ],
+      "step_kind": "internal"
+    }
+  },
+  {
+    "step_index": 2,
+    "events": [
+      {
+        "type": "scheduler_wakeup",
+        "content": "Memory pressure critical. Release at least one resident low-value unit now."
+      }
+    ],
+    "goal_or_focus": "Manage memory while preserving active question.",
+    "task_assertions": {
+      "require_non_halt": true,
+      "require_ops": [
+        "memory_release"
+      ]
+    },
+    "example_output": {
+      "mutations": [],
+      "memory": [
+        {
+          "op": "memory_release"
+        }
+      ],
+      "internal_only": [],
+      "external_outputs": [],
+      "next_focus": [
+        "unit-01"
+      ],
+      "step_kind": "internal"
+    }
+  },
+  {
+    "step_index": 3,
+    "events": [
+      {
+        "type": "human_input",
+        "content": "Answer requires the evicted baseline record unit-09. Fault it in and continue."
+      }
+    ],
+    "goal_or_focus": "Recover necessary context and report progress.",
+    "task_assertions": {
+      "require_ops": [
+        "memory_fault"
+      ],
+      "require_non_halt": true
+    },
+    "example_output": {
+      "mutations": [],
+      "memory": [
+        {
+          "op": "memory_fault"
+        }
+      ],
+      "internal_only": [],
+      "external_outputs": [],
+      "next_focus": [
+        "unit-09"
+      ],
+      "step_kind": "fault_restore"
+    }
+  }
+]

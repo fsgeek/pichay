@@ -1,0 +1,26 @@
+{
+  "experiment_type": "phase3_synthetic_followup_tweak",
+  "generated_at": "2026-03-11T17:06:22.082206+00:00",
+  "pinned_commit": "ba2e528b76d565b7118cd57381696ebb18d84425",
+  "model": "allenai/olmo-3.1-32b-instruct",
+  "replicates": 10,
+  "seed_base": 4000,
+  "decode_config": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_tokens": 4000
+  },
+  "paths": {
+    "runs": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_tweak_20260311T170427Z/phase3_synthetic_followup_tweak_runs.json",
+    "aggregate": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_tweak_20260311T170427Z/phase3_synthetic_followup_tweak_aggregate.json"
+  },
+  "git": {
+    "commit": "ba2e528b76d565b7118cd57381696ebb18d84425",
+    "dirty": true,
+    "branch": "exp4"
+  },
+  "script_hashes": {
+    "/home/tony/projects/pichay/tools/cognitive_step_harness.py": "33008784fe880da90339fd8179a86391318b1f053ec0fe4ce933a5bd8e86c1fa",
+    "/home/tony/projects/pichay/tools/repro_meta.py": "8bc33629228ceef9b951b2156277ac7bb975bca8c91fc72e133624d9104158fc"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "artifact": "olmo3_protocol_v1",
+  "artifact_version": "v1",
+  "generated_at": "2026-03-11T16:48:58.446620+00:00",
+  "model_primary": "allenai/olmo-3.1-32b-instruct",
+  "protocol": {
+    "step_type": "cognitive_step_v1",
+    "teacher_trace_variants": [
+      "full",
+      "reduced"
+    ],
+    "assertions": [
+      "require_non_halt",
+      "min_committed_actions",
+      "require_ops(memory_release,memory_fault)",
+      "require_fault_use_recent",
+      "require_external_output"
+    ]
+  },
+  "files": {
+    "system_prompt": "experiments/cognitive_transactions/artifacts/olmo3_protocol_v1/system_prompt.txt",
+    "teacher_trace_full": "experiments/cognitive_transactions/artifacts/olmo3_protocol_v1/teacher_trace_full.json",
+    "teacher_trace_reduced": "experiments/cognitive_transactions/artifacts/olmo3_protocol_v1/teacher_trace_reduced.json",
+    "input_schema": "experiments/cognitive_transactions/artifacts/olmo3_protocol_v1/input_schema.json",
+    "output_schema": "experiments/cognitive_transactions/artifacts/olmo3_protocol_v1/output_schema.json"
+  },
+  "runtime": {
+    "python_version": "3.10.12",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35"
+  },
+  "git": {
+    "commit": "10c53c140217235c2f3fd888cbbe2feee0b85d65",
+    "dirty": true,
+    "branch": "exp4"
+  },
+  "script_hashes": {
+    "/home/tony/projects/pichay/tools/build_olmo3_protocol_v1.py": "3bd473076e173dea98f26f1f7b6fa2f7e5da9cd468a4d5b5f5455673ce775841",
+    "/home/tony/projects/pichay/tools/cognitive_step_harness.py": "d27a73bc858a4261606ba308ac6168552c04f623611765fd76b828c17a096c2a",
+    "/home/tony/projects/pichay/tools/repro_meta.py": "8bc33629228ceef9b951b2156277ac7bb975bca8c91fc72e133624d9104158fc"
+  }
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "task": "baseline_synthetic",
+    "teacher_trace_mode": "synthetic",
+    "replicates": 1,
+    "steps_total": 2,
+    "valid_steps_total": 2,
+    "required_op_misses_total": 0,
+    "semantic_rejections_total": 0,
+    "content_filters_total": 0,
+    "truncations_total": 0,
+    "valid_rate": 1.0
+  }
+]

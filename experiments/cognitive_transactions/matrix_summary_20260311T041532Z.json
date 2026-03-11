@@ -1,0 +1,24 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "openai/gpt-oss-120b",
+    "teacher_trace_mode": "none",
+    "valid_steps": 2,
+    "total_steps": 5,
+    "required_op_misses": 2,
+    "memory_action_commits": 1,
+    "halt_illegal_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T031630Z-32a3d5d7.jsonl"
+  },
+  {
+    "provider": "openrouter",
+    "model": "openai/gpt-oss-120b",
+    "teacher_trace_mode": "synthetic",
+    "valid_steps": 5,
+    "total_steps": 5,
+    "required_op_misses": 0,
+    "memory_action_commits": 4,
+    "halt_illegal_count": 0,
+    "log_path": "experiments/cognitive_transactions/cognitive_step_v1_treatment_20260311T041456Z-49ea22ea.jsonl"
+  }
+]

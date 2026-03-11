@@ -1,0 +1,34 @@
+[
+  {
+    "condition": "synthetic",
+    "replicates": 1,
+    "steps_total": 2,
+    "valid_steps_total": 2,
+    "valid_rate": 1.0,
+    "required_op_misses_total": 0,
+    "memory_action_commits_total": 1,
+    "semantic_rejections_total": 0,
+    "output_truncated_total": 0,
+    "content_filter_total": 0,
+    "http_error_steps_total": 0,
+    "fault_use_checks_total": 0,
+    "fault_use_failures_total": 0,
+    "fault_use_pass_rate": null
+  },
+  {
+    "condition": "synthetic_reduced",
+    "replicates": 1,
+    "steps_total": 2,
+    "valid_steps_total": 0,
+    "valid_rate": 0.0,
+    "required_op_misses_total": 1,
+    "memory_action_commits_total": 0,
+    "semantic_rejections_total": 2,
+    "output_truncated_total": 0,
+    "content_filter_total": 0,
+    "http_error_steps_total": 0,
+    "fault_use_checks_total": 0,
+    "fault_use_failures_total": 0,
+    "fault_use_pass_rate": null
+  }
+]

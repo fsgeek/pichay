@@ -1,0 +1,18 @@
+[
+  {
+    "task": "baseline_synthetic",
+    "task_description": "Longer-horizon synthetic protocol durability run.",
+    "replicate": 1,
+    "seed": 5000,
+    "teacher_trace_mode": "synthetic",
+    "max_steps": 2,
+    "log_path": "experiments/cognitive_transactions/phase4/phase4_20260311T171133Z/cognitive_step_v1_treatment_20260311T171133Z-6d2b5f14.jsonl",
+    "steps": 2,
+    "valid_steps": 2,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "content_filters": 0,
+    "truncations": 0
+  }
+]

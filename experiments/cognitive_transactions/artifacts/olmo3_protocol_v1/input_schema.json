@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cognitive_step_v1.input",
+  "title": "Cognitive Step V1 Input",
+  "type": "object",
+  "required": [
+    "workspace",
+    "events",
+    "policies",
+    "allowed_actions",
+    "goal_or_focus",
+    "policy_header",
+    "clock",
+    "event_id",
+    "parent_refs"
+  ],
+  "properties": {
+    "workspace": {
+      "type": "object",
+      "required": [
+        "resident_units",
+        "evicted_handles",
+        "focus"
+      ],
+      "properties": {
+        "resident_units": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "type",
+              "content"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "content": {}
+            },
+            "additionalProperties": true
+          }
+        },
+        "evicted_handles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "focus": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "content": {}
+        },
+        "additionalProperties": true
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "allowed_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "goal_or_focus": {
+      "type": "string"
+    },
+    "policy_header": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "clock": {
+      "type": "object",
+      "required": [
+        "lamport",
+        "session"
+      ],
+      "properties": {
+        "lamport": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "event_id": {
+      "type": "string"
+    },
+    "parent_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

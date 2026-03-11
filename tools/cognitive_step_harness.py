@@ -1205,12 +1205,13 @@ def run_experiment(
     request_hard_timeout: float = 180.0,
     max_retries: int = 3,
     teacher_trace_override: list[dict[str, Any]] | None = None,
+    scenario_override: list[dict[str, Any]] | None = None,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     out_path = out_dir / f"cognitive_step_v1_{mode}_{run_id}.jsonl"
 
-    scenario = _single_agent_paging_scenario(mode=mode)
+    scenario = scenario_override if scenario_override is not None else _single_agent_paging_scenario(mode=mode)
     if max_steps > 0:
         scenario = scenario[:max_steps]
     teacher_trace: list[dict[str, Any]] | None = teacher_trace_override

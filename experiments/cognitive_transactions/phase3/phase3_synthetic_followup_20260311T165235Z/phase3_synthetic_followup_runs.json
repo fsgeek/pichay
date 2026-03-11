@@ -1,0 +1,52 @@
+[
+  {
+    "replicate": 1,
+    "seed": 3000,
+    "steps": 5,
+    "valid_steps": 4,
+    "valid_rate": 0.8,
+    "required_op_misses": 0,
+    "semantic_rejections": 1,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/cognitive_step_v1_treatment_20260311T165235Z-44ab4446.jsonl"
+  },
+  {
+    "replicate": 2,
+    "seed": 3001,
+    "steps": 5,
+    "valid_steps": 5,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/cognitive_step_v1_treatment_20260311T165247Z-ff461857.jsonl"
+  },
+  {
+    "replicate": 3,
+    "seed": 3002,
+    "steps": 5,
+    "valid_steps": 4,
+    "valid_rate": 0.8,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/cognitive_step_v1_treatment_20260311T165301Z-b8f75437.jsonl"
+  },
+  {
+    "replicate": 4,
+    "seed": 3003,
+    "steps": 5,
+    "valid_steps": 5,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/cognitive_step_v1_treatment_20260311T165312Z-7020050f.jsonl"
+  },
+  {
+    "replicate": 5,
+    "seed": 3004,
+    "steps": 5,
+    "valid_steps": 5,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "semantic_rejections": 0,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_synthetic_followup_20260311T165235Z/cognitive_step_v1_treatment_20260311T165322Z-f344e667.jsonl"
+  }
+]

@@ -10,3 +10,4 @@ logs/
 *.fls
 *.log
 *.out
+.serena/

@@ -1,0 +1,28 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "inception/mercury-2",
+    "teacher_trace_mode": "synthetic",
+    "mode": "treatment",
+    "decode_config": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "max_tokens": 400,
+      "seed": 1000
+    },
+    "openrouter_app": "pichay-phase2:treatment:synthetic:rep1",
+    "log_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150516Z/cognitive_step_v1_treatment_20260311T150516Z-ed8b6a9b.jsonl",
+    "steps": 1,
+    "valid_steps": 0,
+    "required_op_misses": 0,
+    "memory_action_commits": 0,
+    "halt_illegal_count": 0,
+    "semantic_rejection_count": 0,
+    "content_filter_count": 0,
+    "output_truncated_count": 1,
+    "http_error_steps": 0,
+    "fault_use_checks": 0,
+    "fault_use_failures": 0,
+    "replicate": 1
+  }
+]

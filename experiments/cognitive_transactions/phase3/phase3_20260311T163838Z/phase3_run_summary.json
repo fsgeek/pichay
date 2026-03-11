@@ -1,0 +1,38 @@
+[
+  {
+    "model": "allenai/olmo-3.1-32b-instruct",
+    "condition": "synthetic",
+    "steps": 2,
+    "valid_steps": 2,
+    "valid_rate": 1.0,
+    "required_op_misses": 0,
+    "memory_action_commits": 1,
+    "semantic_rejections": 0,
+    "output_truncated_count": 0,
+    "content_filter_count": 0,
+    "http_error_steps": 0,
+    "fault_use_checks": 0,
+    "fault_use_failures": 0,
+    "fault_use_pass_rate": null,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_20260311T163838Z/cognitive_step_v1_treatment_20260311T163838Z-ed5120b1.jsonl",
+    "replicate": 1
+  },
+  {
+    "model": "allenai/olmo-3.1-32b-instruct",
+    "condition": "synthetic_reduced",
+    "steps": 2,
+    "valid_steps": 0,
+    "valid_rate": 0.0,
+    "required_op_misses": 1,
+    "memory_action_commits": 0,
+    "semantic_rejections": 2,
+    "output_truncated_count": 0,
+    "content_filter_count": 0,
+    "http_error_steps": 0,
+    "fault_use_checks": 0,
+    "fault_use_failures": 0,
+    "fault_use_pass_rate": null,
+    "log_path": "experiments/cognitive_transactions/phase3/phase3_20260311T163838Z/cognitive_step_v1_treatment_20260311T163842Z-386f0773.jsonl",
+    "replicate": 1
+  }
+]

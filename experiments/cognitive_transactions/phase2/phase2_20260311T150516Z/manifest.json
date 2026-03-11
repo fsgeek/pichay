@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-03-11T15:05:18.194911+00:00",
+  "run_dir": "experiments/cognitive_transactions/phase2/phase2_20260311T150516Z",
+  "models": [
+    "inception/mercury-2"
+  ],
+  "replicates": 1,
+  "teacher_traces": [
+    "synthetic"
+  ],
+  "mode": "treatment",
+  "max_steps": 1,
+  "decode_config": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_tokens": 400,
+    "seed_base": 1000
+  },
+  "run_summary_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150516Z/phase2_run_summary.json",
+  "aggregate_json_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150516Z/phase2_aggregate.json",
+  "aggregate_csv_path": "experiments/cognitive_transactions/phase2/phase2_20260311T150516Z/phase2_aggregate.csv"
+}
