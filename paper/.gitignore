@@ -7,3 +7,6 @@
 *.fdb_latexmk
 *.fls
 *.xdv
+
+# Windows download metadata (NTFS alternate data stream exported as a file)
+*:Zone.Identifier

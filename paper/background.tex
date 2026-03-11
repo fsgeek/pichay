@@ -71,6 +71,11 @@ attention cost is quadratic in context length, and the $O(n^2)$ cost
 explosion in long sessions means that even million-token windows
 fill and degrade~\citep{zeyliger2026quadratic}.
 
+Long-context performance degradation is not solely a retrieval failure.
+Even with perfect retrieval of relevant evidence, model accuracy can
+drop substantially as irrelevant context length increases (and even when
+irrelevant tokens are masked)~\citep{du2025contextlengthhurtsllm}.
+
 The alternative is architectural: a managed hierarchy of levels,
 each larger, slower, and cheaper than the one above it, connected by
 eviction policies and fault mechanisms (Table~\ref{tab:hierarchy}).
