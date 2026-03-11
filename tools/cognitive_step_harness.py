@@ -85,6 +85,39 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _build_contract(step: dict[str, Any]) -> dict[str, Any]:
+    """Build an explicit legality contract for the current step."""
+    assertions = step.get("task_assertions", {}) if isinstance(step.get("task_assertions"), dict) else {}
+    workspace = step.get("workspace", {}) if isinstance(step.get("workspace"), dict) else {}
+    resident_units = workspace.get("resident_units", []) if isinstance(workspace.get("resident_units"), list) else []
+    evicted_handles = workspace.get("evicted_handles", []) if isinstance(workspace.get("evicted_handles"), list) else []
+    resident_ids = [u.get("id") for u in resident_units if isinstance(u, dict) and isinstance(u.get("id"), str)]
+    evicted_ids = [x for x in evicted_handles if isinstance(x, str)]
+
+    return {
+        "required_top_level": [
+            "mutations",
+            "memory",
+            "internal_only",
+            "external_outputs",
+            "next_focus",
+            "step_kind",
+        ],
+        "return_json_only": True,
+        "step_constraints": {
+            "halt_allowed": not bool(assertions.get("require_non_halt")),
+            "required_ops": assertions.get("require_ops", []) if isinstance(assertions.get("require_ops"), list) else [],
+            "memory_release_allowed_ids": resident_ids,
+            "memory_fault_allowed_ids": evicted_ids,
+        },
+        "legality_rules": [
+            "Do not emit step_kind=halt when halt_allowed is false.",
+            "memory_release ids must be chosen only from memory_release_allowed_ids.",
+            "memory_fault ids must be chosen only from memory_fault_allowed_ids.",
+        ],
+    }
+
+
 def _workspace_unit_ids(workspace: dict[str, Any]) -> set[str]:
     resident = workspace.get("resident_units", [])
     ids: set[str] = set()
@@ -379,17 +412,7 @@ def _lmstudio_chat(
                         "task": "execute_cognitive_step_v1",
                         "step": step,
                         "teacher_trace": teacher_trace or [],
-                        "contract": {
-                            "required_top_level": [
-                                "mutations",
-                                "memory",
-                                "internal_only",
-                                "external_outputs",
-                                "next_focus",
-                                "step_kind",
-                            ],
-                            "return_json_only": True,
-                        },
+                        "contract": _build_contract(step),
                     },
                     ensure_ascii=True,
                 ),
@@ -546,17 +569,7 @@ def _openrouter_chat(
                         "task": "execute_cognitive_step_v1",
                         "step": step,
                         "teacher_trace": teacher_trace or [],
-                        "contract": {
-                            "required_top_level": [
-                                "mutations",
-                                "memory",
-                                "internal_only",
-                                "external_outputs",
-                                "next_focus",
-                                "step_kind",
-                            ],
-                            "return_json_only": True,
-                        },
+                        "contract": _build_contract(step),
                     },
                     ensure_ascii=True,
                 ),
