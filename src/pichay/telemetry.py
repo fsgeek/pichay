@@ -139,6 +139,7 @@ class Telemetry:
         duplication_score: float,
         usage: dict[str, Any] | None = None,
         messages_full: list[dict] | None = None,
+        response_text: str | None = None,
     ) -> None:
         shrink_ratio = (outgoing_bytes / incoming_bytes) if incoming_bytes > 0 else 1.0
 
@@ -202,6 +203,7 @@ class Telemetry:
             size_saved_tokens_est=round(size_saved_tokens_est, 1),
             net_token_value_est=round(net_token_value_est, 1),
             messages_full=messages_full or [],
+            response_text=response_text or "",
         )
 
         # Small increases are expected — Pichay injects tensor handles,

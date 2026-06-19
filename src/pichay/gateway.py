@@ -193,8 +193,11 @@ def _inspect_sse_chunk(
     session_id: str,
     provider: str,
     usage_accumulator: dict[str, Any] | None = None,
+    text_accumulator: list[str] | None = None,
 ) -> None:
-    """Best-effort SSE validation for telemetry; never mutates payload."""
+    """Best-effort SSE validation for telemetry; never mutates payload.
+    When `text_accumulator` is given, the assistant's `text_delta` words are
+    collected so the log can record what the instance SAID, not just its size."""
     buffer.extend(chunk)
     while b"\n\n" in buffer:
         raw_event, rest = buffer.split(b"\n\n", 1)
@@ -234,6 +237,11 @@ def _inspect_sse_chunk(
                         usage = evt.get("usage", {})
                         if isinstance(usage, dict):
                             usage_accumulator.update(usage)
+                if text_accumulator is not None and isinstance(evt, dict):
+                    if evt.get("type") == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                            text_accumulator.append(delta.get("text", ""))
             except json.JSONDecodeError as e:
                 emit_event(
                     "anomaly",
@@ -916,6 +924,7 @@ def create_app(
                 stream_error = False
                 sse_buffer = bytearray()
                 usage: dict[str, Any] = {}
+                assistant_text: list[str] = []
                 try:
                     with client.stream("POST", upstream_path, json=outgoing_body, headers=headers) as resp:
                         status_code = resp.status_code
@@ -935,6 +944,7 @@ def create_app(
                                     session_id=session_id,
                                     provider=provider,
                                     usage_accumulator=usage,
+                                    text_accumulator=assistant_text,
                                 )
                                 yield chunk
                 except Exception as e:
@@ -979,6 +989,7 @@ def create_app(
                         duplication_score=duplication_score,
                         usage=usage,
                         messages_full=payload.get("messages", []),
+                        response_text="".join(assistant_text),
                     )
             return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -996,12 +1007,20 @@ def create_app(
             raise HTTPException(status_code=502, detail=str(e))
 
         usage: dict[str, Any] = {}
+        response_text = ""
         try:
             parsed = resp.json()
             if isinstance(parsed, dict):
                 u = parsed.get("usage", {})
                 if isinstance(u, dict):
                     usage = u
+                blocks = parsed.get("content", [])
+                if isinstance(blocks, list):
+                    response_text = "".join(
+                        b.get("text", "")
+                        for b in blocks
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
         except Exception:
             usage = {}
 
@@ -1035,6 +1054,7 @@ def create_app(
             duplication_score=duplication_score,
             usage=usage,
             messages_full=payload.get("messages", []),
+            response_text=response_text,
         )
         return Response(content=resp.content, status_code=resp.status_code, headers=_copy_headers(resp.headers))
 
