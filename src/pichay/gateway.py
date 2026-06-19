@@ -557,6 +557,7 @@ def create_app(
     anthropic_model_override: str | None = None,
     openai_model_override: str | None = None,
     process_session_id: str | None = None,
+    mode: str = "observe",
 ) -> FastAPI:
     clients: dict[str, httpx.Client] = {}
 
@@ -699,6 +700,11 @@ def create_app(
         ps = session.page_store
         ms = session.message_store
 
+        # Capture the model's original outbound view before ingest may mutate
+        # the list. In observe mode this is forwarded untouched so Pichay
+        # measures without perturbing the model's context stream.
+        raw_outbound = copy.deepcopy(incoming_messages)
+
         # 1. Ingest into MessageStore (asserts append-only, compacts)
         ingest = ms.ingest(
             incoming_messages,
@@ -744,19 +750,30 @@ def create_app(
                     file=sys.stderr,
                 )
 
-        # 4. Build ephemeral outbound view — never mutate the physical store
-        payload["messages"] = copy.deepcopy(ms.messages)
+        # 4. Build ephemeral outbound view — never mutate the physical store.
+        # In observe mode, forward the model's original messages untouched
+        # (measurement above still ran); in active mode, forward the compacted,
+        # tensor-substituted view.
+        if mode == "active":
+            payload["messages"] = copy.deepcopy(ms.messages)
+        else:
+            payload["messages"] = raw_outbound
 
-        # Place cache_control markers at optimal positions
-        _place_cache_controls(payload)
+        # Place cache_control markers at optimal positions.
+        # Skipped in observe mode: it mutates the forwarded messages in place,
+        # which would perturb the model's original outbound view.
+        if mode == "active":
+            _place_cache_controls(payload)
 
-        # System status: static system prompt + dynamic anchor
-        inject_system_status(
-            payload, ts, token_cap, request_time,
-            block_store=session.block_store,
-            page_store=ps,
-            last_cleanup_stats=session.last_cleanup_stats,
-        )
+        # System status: static system prompt + dynamic anchor.
+        # Skipped in observe mode to avoid perturbing the model's context.
+        if mode == "active":
+            inject_system_status(
+                payload, ts, token_cap, request_time,
+                block_store=session.block_store,
+                page_store=ps,
+                last_cleanup_stats=session.last_cleanup_stats,
+            )
 
         # Block labeling (with injection-safe validation)
         session.block_store.label_messages(ms.messages, ts["turn"])

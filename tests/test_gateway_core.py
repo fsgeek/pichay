@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -11,9 +12,48 @@ from pichay.core.models import CanonicalMessage, CanonicalRequest
 from pichay.core.pipeline import Pipeline
 from pichay.core.policy import PolicyConfig, apply_action, paging_stage, trim_stage
 from pichay.core.utils import content_bytes, parse_duration
-from pichay.gateway import _copy_headers, _duplication_score, create_app
+from pichay.gateway import _copy_headers, _duplication_score, _inspect_sse_chunk, create_app
 from pichay.providers.anthropic import AnthropicAdapter
 from pichay.providers.openai import OpenAIAdapter
+
+
+def _sse(events: list[dict]) -> bytes:
+    """Encode events as an Anthropic-style SSE byte stream."""
+    return b"".join(
+        f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode("utf-8") for e in events
+    )
+
+
+def test_inspect_sse_chunk_captures_assistant_text():
+    """The proxy already parses every SSE event; it must keep the text_delta words,
+    not just their byte count. Closes the 'manufactured silence' response void:
+    what the instance SAID, captured at generation time."""
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "Picking up "}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "from context death."}},
+        {"type": "message_delta", "usage": {"output_tokens": 7}},
+    ])
+    text_parts: list[str] = []
+    usage: dict = {}
+    buffer = bytearray()  # persists across chunks, as in the live generator
+    # Feed in two arbitrary splits to exercise the buffer across chunk boundaries.
+    mid = len(stream) // 2
+    for chunk in (stream[:mid], stream[mid:]):
+        _inspect_sse_chunk(
+            chunk,
+            buffer=buffer,
+            emit_event=lambda *a, **k: None,
+            request_id="r",
+            session_id="s",
+            provider="anthropic",
+            usage_accumulator=usage,
+            text_accumulator=text_parts,
+        )
+    assert "".join(text_parts) == "Picking up from context death."
+    assert usage.get("output_tokens") == 7  # existing usage capture still works
 
 
 def test_parse_duration():
@@ -639,6 +679,152 @@ def test_compacted_tool_result_preserves_anthropic_schema(tmp_path: Path):
         assert "content" in block
         assert "text" not in block
         assert "pichay_compacted" not in block
+
+
+def _aging_tool_result_stream():
+    """A message stream with a large, stale tool_result old enough (>= age
+    threshold of 4 user turns from the end) to be compacted to a [tensor:]
+    handle by MessageStore.ingest during _preprocess."""
+    big = "Z" * 800
+    return [
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t0", "content": big}],
+        },
+        {"role": "assistant", "content": [{"type": "text", "text": "ok0"}]},
+        {"role": "user", "content": [{"type": "text", "text": "u1"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "a1"}]},
+        {"role": "user", "content": [{"type": "text", "text": "u2"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "a2"}]},
+        {"role": "user", "content": [{"type": "text", "text": "u3"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "a3"}]},
+        {"role": "user", "content": [{"type": "text", "text": "u4 latest"}]},
+    ]
+
+
+def _make_mode_app(tmp_path: Path, mode: str):
+    return create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=True,
+        enable_trim=False,
+        min_evict_size=100,
+        process_session_id="proc_test",
+        mode=mode,
+    )
+
+
+def test_active_mode_perturbs_outbound_payload(tmp_path: Path):
+    # Characterization: active mode keeps the compacted, tensor-substituted
+    # view and the injected pichay-system-status block.
+    app = _make_mode_app(tmp_path, mode="active")
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["anthropic"] = cap
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-test",
+            "max_tokens": 64,
+            "stream": False,
+            "messages": copy.deepcopy(_aging_tool_result_stream()),
+        },
+    )
+    assert resp.status_code == 200
+    out = cap.last_json
+    assert out is not None
+    blob = json.dumps(out)
+    assert "[tensor:" in blob, "active mode should compact stale tool_result to a tensor handle"
+    assert "pichay-system-status" in blob, "active mode should inject the system status block"
+
+
+def test_observe_mode_forwards_original_messages(tmp_path: Path):
+    # New behavior: observe mode forwards the original messages untouched and
+    # does NOT inject the system status / yuyay-manifest block.
+    app = _make_mode_app(tmp_path, mode="observe")
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["anthropic"] = cap
+
+    incoming = copy.deepcopy(_aging_tool_result_stream())
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-test",
+            "max_tokens": 64,
+            "stream": False,
+            "messages": copy.deepcopy(incoming),
+        },
+    )
+    assert resp.status_code == 200
+    out = cap.last_json
+    assert out is not None
+    blob = json.dumps(out)
+    assert "[tensor:" not in blob, "observe mode must not substitute tensor handles outbound"
+    assert "pichay-system-status" not in blob, "observe mode must not inject system status"
+    assert "yuyay-manifest" not in blob, "observe mode must not inject the memory manifest"
+    assert out["messages"] == incoming, "observe mode must forward the original messages untouched"
+
+
+def test_observe_mode_still_measures(tmp_path: Path):
+    # Observe mode silences the outbound perturbation, NOT the measurement:
+    # MessageStore.ingest must still run and compact internally.
+    app = _make_mode_app(tmp_path, mode="observe")
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["anthropic"] = cap
+
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-test",
+            "max_tokens": 64,
+            "stream": False,
+            "messages": copy.deepcopy(_aging_tool_result_stream()),
+        },
+    )
+    assert resp.status_code == 200
+
+    session = next(iter(app.state.sessions.all().values()))
+    internal = json.dumps(session.message_store.messages)
+    assert "[tensor:" in internal, "observe mode must still compact internally (measurement intact)"
+
+
+def test_default_mode_is_observe(tmp_path: Path):
+    # create_app with no mode arg must behave as observe (no outbound perturbation).
+    app = create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=True,
+        enable_trim=False,
+        min_evict_size=100,
+        process_session_id="proc_test",
+    )
+    cap = _CaptureNonStreamClient(response=httpx.Response(200, json={"ok": True}))
+    app.state.clients["anthropic"] = cap
+
+    incoming = copy.deepcopy(_aging_tool_result_stream())
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-test",
+            "max_tokens": 64,
+            "stream": False,
+            "messages": copy.deepcopy(incoming),
+        },
+    )
+    assert resp.status_code == 200
+    out = cap.last_json
+    blob = json.dumps(out)
+    assert "[tensor:" not in blob
+    assert "pichay-system-status" not in blob
+    assert out["messages"] == incoming
 
 
 # ── OpenAI adapter multi-block denormalize ─────────────────────────

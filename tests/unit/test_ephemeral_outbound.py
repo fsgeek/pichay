@@ -19,6 +19,7 @@ def _make_app(tmp_path):
         enable_trim=False,
         min_evict_size=500,
         process_session_id="ephemeral-test",
+        mode="active",
     )
 
 
