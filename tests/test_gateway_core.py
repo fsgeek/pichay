@@ -865,3 +865,45 @@ def test_anthropic_adapter_upstream_path():
     req = CanonicalRequest(provider="anthropic", model="x", max_tokens=10, stream=False, messages=[])
     assert adapter.upstream_path(req, endpoint="messages") == "/v1/messages"
     assert adapter.upstream_path(req, endpoint="count_tokens") == "/v1/messages/count_tokens"
+
+
+def test_system_prompt_captured_once_to_sidecar(tmp_path: Path):
+    """The system prompt actually sent is persisted to a per-run sidecar,
+    deduped so repeated identical prompts are stored once — and the per-call
+    gateway log still omits the (large, invariant) system field."""
+    app = create_app(
+        log_dir=tmp_path,
+        anthropic_upstream="http://anthropic.test",
+        openai_upstream="http://openai.test",
+        hydration_window_seconds=24 * 3600,
+        enable_paging=False, enable_trim=False,
+        min_evict_size=500, process_session_id="proc_test",
+        mode="observe",
+    )
+    upstream_body = {"id": "msg_1", "content": [{"type": "text", "text": "hi"}]}
+    app.state.clients["anthropic"] = _FakeNonStreamClient(
+        response=httpx.Response(200, json=upstream_body),
+    )
+    client = TestClient(app)
+
+    system = [{"type": "text", "text": "You are Claude Code. Be well."}]
+    for _ in range(3):
+        resp = client.post("/v1/messages", json={
+            "model": "claude-test", "max_tokens": 64, "stream": False,
+            "system": system,
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert resp.status_code == 200
+
+    sidecar = app.state.telemetry.system_log_path
+    recs = [json.loads(l) for l in sidecar.read_text().splitlines()]
+    # 3 identical requests -> exactly one captured system prompt
+    assert len(recs) == 1
+    assert recs[0]["type"] == "system_prompt"
+    assert recs[0]["system"][0]["text"] == "You are Claude Code. Be well."
+    # observe mode must not have rewritten it (no cache_control injected)
+    assert "cache_control" not in recs[0]["system"][0]
+    # per-call telemetry still omits the system field
+    metrics = [e for e in app.state.telemetry.recent_events()
+               if e.get("type") == "request_metrics"]
+    assert metrics and all("system" not in m for m in metrics)
