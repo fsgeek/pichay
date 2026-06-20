@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections import defaultdict, deque
@@ -70,6 +71,12 @@ class SessionSummary:
 class Telemetry:
     def __init__(self, log_path: Path, hydration_window_seconds: int, max_events: int = 5000):
         self.log_path = log_path
+        # Per-run sidecar for the system prompt actually sent. Static across the
+        # run, so we store it once (hash-deduped) instead of on every record.
+        self.system_log_path = log_path.with_name(
+            log_path.name.replace("gateway_", "system_", 1)
+        )
+        self._system_hashes: set[str] = set()
         self.hydration_window_seconds = hydration_window_seconds
         self._lock = threading.Lock()
         self.events: deque[dict[str, Any]] = deque(maxlen=max_events)
@@ -77,6 +84,32 @@ class Telemetry:
 
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._hydrate()
+
+    def record_system(self, system: Any, *, model: str = "", provider: str = "") -> None:
+        """Persist a distinct system prompt once per run to the sidecar file.
+
+        The system prompt is large and (almost) invariant within a run, so the
+        per-request telemetry deliberately omits it. We write it here, deduped by
+        content hash, so a changed prompt mid-run is also captured.
+        """
+        if not system:
+            return
+        blob = json.dumps(system, default=str, sort_keys=True).encode("utf-8")
+        h = hashlib.sha256(blob).hexdigest()
+        with self._lock:
+            if h in self._system_hashes:
+                return
+            self._system_hashes.add(h)
+            record = {
+                "type": "system_prompt",
+                "timestamp": self._now(),
+                "hash": h,
+                "model": model,
+                "provider": provider,
+                "system": system,
+            }
+            with open(self.system_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, default=str) + "\n")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -140,7 +173,10 @@ class Telemetry:
         usage: dict[str, Any] | None = None,
         messages_full: list[dict] | None = None,
         response_text: str | None = None,
+        system: Any = None,
     ) -> None:
+        self.record_system(system, model=model, provider=provider)
+
         shrink_ratio = (outgoing_bytes / incoming_bytes) if incoming_bytes > 0 else 1.0
 
         with self._lock:

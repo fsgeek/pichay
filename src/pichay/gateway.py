@@ -990,6 +990,7 @@ def create_app(
                         usage=usage,
                         messages_full=payload.get("messages", []),
                         response_text="".join(assistant_text),
+                        system=payload.get("system"),
                     )
             return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -1055,6 +1056,7 @@ def create_app(
             usage=usage,
             messages_full=payload.get("messages", []),
             response_text=response_text,
+            system=payload.get("system"),
         )
         return Response(content=resp.content, status_code=resp.status_code, headers=_copy_headers(resp.headers))
 
